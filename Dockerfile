@@ -1,5 +1,9 @@
 FROM node:22-alpine AS base
 
+# Upgrade OS packages and npm to resolve Trivy CVEs
+RUN apk upgrade --no-cache && \
+    npm install -g npm@latest
+
 RUN corepack enable pnpm
 
 WORKDIR /app
