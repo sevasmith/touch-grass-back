@@ -27,7 +27,8 @@ RUN pnpm run build
 
 FROM base AS production
 
-RUN apk add --no-cache tini
+RUN apk add --no-cache tini && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn*
 
 ENV NODE_ENV=production
 ENV PORT=3001
