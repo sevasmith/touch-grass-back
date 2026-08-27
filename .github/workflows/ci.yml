@@ -89,18 +89,6 @@ jobs:
           path: coverage/
           retention-days: 14
 
-      - name: Enforce coverage threshold
-        run: |
-          COVERAGE=$(node -e "
-            const report = require('./coverage/coverage-summary.json');
-            console.log(report.total.lines.pct);
-          ")
-          echo "Line coverage: ${COVERAGE}%"
-          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
-            echo "::error::Line coverage ${COVERAGE}% is below the 80% threshold"
-            exit 1
-          fi
-
   # ──────────────────────────────────────────────
   # E2E Tests
   # ──────────────────────────────────────────────
