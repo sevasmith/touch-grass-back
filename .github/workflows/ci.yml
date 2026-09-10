@@ -86,6 +86,20 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: touchgrass
+          POSTGRES_PASSWORD: touchgrass
+          POSTGRES_DB: touchgrass_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U touchgrass -d touchgrass_dev"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -108,6 +122,11 @@ jobs:
         run: pnpm test:e2e
         env:
           CI: true
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USERNAME: touchgrass
+          DB_PASSWORD: touchgrass
+          DB_NAME: touchgrass_dev
 
 
   docker-build:
