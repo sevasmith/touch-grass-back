@@ -9,19 +9,16 @@ on:
 
 concurrency:
   group: cd-main
-  cancel-in-progress: false  # Never cancel in-flight deployments
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
-  NODE_VERSION: '22'
+  NODE_VERSION: '24'
   PNPM_VERSION: '10'
 
 jobs:
-  # ──────────────────────────────────────────────
-  # CI Gate — Full quality checks before deploy
-  # ──────────────────────────────────────────────
   lint-and-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest
@@ -104,9 +101,7 @@ jobs:
         env:
           CI: true
 
-  # ──────────────────────────────────────────────
-  # Build & Push Docker Image to ECR
-  # ──────────────────────────────────────────────
+
   build-and-push:
     name: Build & Push to ECR
     runs-on: ubuntu-latest
@@ -114,7 +109,7 @@ jobs:
     needs: [lint-and-typecheck, unit-tests, e2e-tests]
     permissions:
       contents: read
-      id-token: write  # Required for OIDC
+      id-token: write
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
@@ -183,9 +178,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
-  # ──────────────────────────────────────────────
-  # Scan pushed image with Trivy
-  # ──────────────────────────────────────────────
+
   image-scan:
     name: Scan Pushed Image
     runs-on: ubuntu-latest
@@ -194,7 +187,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write  # For SARIF upload
+      security-events: write
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -220,9 +213,7 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
 
-  # ──────────────────────────────────────────────
-  # Deploy to ECS Fargate
-  # ──────────────────────────────────────────────
+
   deploy:
     name: Deploy to ECS
     runs-on: ubuntu-latest
