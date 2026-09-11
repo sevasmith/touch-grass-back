@@ -1,5 +1,6 @@
 allowBuilds:
   '@parcel/watcher': false
+  argon2: true
   unrs-resolver: false
 
 overrides:
