@@ -127,6 +127,9 @@ jobs:
           DB_USERNAME: touchgrass
           DB_PASSWORD: touchgrass
           DB_NAME: touchgrass_dev
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_ACCESS_TTL: ${{ vars.JWT_ACCESS_TTL }}
+          JWT_REFRESH_TTL: ${{ vars.JWT_REFRESH_TTL }}
 
 
   docker-build:
