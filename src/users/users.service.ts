@@ -17,6 +17,15 @@ export class UsersService {
       .where('user.email = :email', { email })
       .getOne();
   }
+
+  async findById(id: string): Promise<User | null> {
+    return this.userRepository.findOneBy({ id });
+  }
+
+  async updateLastLoginAt(id: string): Promise<void> {
+    await this.userRepository.update(id, { lastLoginAt: new Date() });
+  }
+
   async create(email: string, passwordHash: string): Promise<User> {
     const user = this.userRepository.create({ email, passwordHash });
     try {
