@@ -31,6 +31,9 @@ export class ResetToken {
   @Column({ type: 'timestamptz', nullable: true })
   usedAt: Date | null;
 
+  @Column({ type: 'timestamptz', nullable: true })
+  invalidatedAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

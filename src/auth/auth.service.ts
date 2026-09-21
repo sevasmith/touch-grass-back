@@ -163,8 +163,8 @@ export class AuthService {
     await this.dataSource.transaction(async (manager) => {
       const resetTokens = manager.withRepository(this.resetTokenRepository);
       await resetTokens.update(
-        { userId: user.id, usedAt: IsNull() },
-        { usedAt: new Date() },
+        { userId: user.id, usedAt: IsNull(), invalidatedAt: IsNull() },
+        { invalidatedAt: new Date() },
       );
       await resetTokens.insert({
         id,
@@ -200,6 +200,16 @@ export class AuthService {
       throw new UnauthorizedException('Invalid reset token');
     }
 
+    const user = await this.usersService.findByIdWithPassword(
+      tokenRecord.userId,
+    );
+
+    if (user && (await verify(user.passwordHash, dto.password))) {
+      throw new UnauthorizedException(
+        'New password must be different from your current password',
+      );
+    }
+
     const providedHash = createHash('sha256').update(dto.token).digest();
     const savedHash = Buffer.from(tokenRecord.tokenHash, 'hex');
 
@@ -212,16 +222,24 @@ export class AuthService {
     }
 
     const { affected } = await this.resetTokenRepository.update(
-      { id: tokenRecord.id, usedAt: IsNull() },
+      { id: tokenRecord.id, usedAt: IsNull(), invalidatedAt: IsNull() },
       { usedAt: new Date() },
     );
 
     if (!affected) {
-      await this.refreshTokenRepository.update(
-        { userId: tokenRecord.userId, revokedAt: IsNull() },
-        { revokedAt: new Date() },
+      const current = await this.resetTokenRepository.findOne({
+        where: { id: tokenRecord.id },
+      });
+      if (current?.usedAt) {
+        await this.refreshTokenRepository.update(
+          { userId: tokenRecord.userId, revokedAt: IsNull() },
+          { revokedAt: new Date() },
+        );
+        throw new UnauthorizedException('Reset token already used');
+      }
+      throw new UnauthorizedException(
+        'This reset link has been replaced by a newer request',
       );
-      throw new UnauthorizedException('Reset token already used');
     }
 
     const newPasswordHash = await hash(dto.password);

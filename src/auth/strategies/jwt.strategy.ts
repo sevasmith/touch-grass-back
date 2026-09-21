@@ -7,6 +7,7 @@ import { UsersService } from '../../users/users.service';
 interface JwtPayload {
   sub: string;
   email: string;
+  iat: number;
 }
 
 @Injectable()
@@ -25,6 +26,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   async validate(payload: JwtPayload) {
     const user = await this.userService.findById(payload.sub);
     if (!user) throw new UnauthorizedException();
+    if (
+      user.passwordChangedAt &&
+      payload.iat * 1000 < user.passwordChangedAt.getTime()
+    ) {
+      throw new UnauthorizedException();
+    }
     return { id: payload.sub, email: payload.email };
   }
 }
