@@ -135,6 +135,7 @@ jobs:
           BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
           MAIL_FROM_EMAIL: ${{ vars.MAIL_FROM_EMAIL }}
           MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
 
 
   docker-build:
