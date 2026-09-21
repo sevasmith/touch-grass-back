@@ -130,6 +130,11 @@ jobs:
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           JWT_ACCESS_TTL: ${{ vars.JWT_ACCESS_TTL }}
           JWT_REFRESH_TTL: ${{ vars.JWT_REFRESH_TTL }}
+          PASSWORD_RESET_TTL: ${{ vars.PASSWORD_RESET_TTL }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          MAIL_FROM_EMAIL: ${{ vars.MAIL_FROM_EMAIL }}
+          MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
 
 
   docker-build:
@@ -158,7 +163,7 @@ jobs:
           docker run -d --name ci-test -p 3001:3001 touch-grass-back:ci-test
           sleep 5
           docker logs ci-test
-          curl -sf http://localhost:3001/ || echo "Health check endpoint not yet available (expected if no root route)"
+          curl -sf http://localhost:3001/health || echo "Health check failed - expected until this job provisions DB/env vars for the container (see docs/forgot-reset-password-todo.md)"
           docker stop ci-test
           docker rm ci-test
 
