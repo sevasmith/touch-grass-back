@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import helmet from 'helmet';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -10,9 +11,11 @@ async function bootstrap() {
     new ValidationPipe({
       whitelist: true,
       transform: true,
-      enableDebugMessages: true,
+      enableDebugMessages: process.env.NODE_ENV !== 'production',
     }),
   );
+
+  app.use(helmet({ contentSecurityPolicy: false }));
 
   const configService = app.get(ConfigService);
   const corsOrigins = configService
