@@ -8,13 +8,16 @@ import { ConfigService, ConfigModule } from '@nestjs/config';
 import type { StringValue } from 'ms';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { ResetToken } from './entities/reset-token.entity';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { MailModule } from '../mail/mail.module';
 
 @Module({
   imports: [
     UsersModule,
-    TypeOrmModule.forFeature([RefreshToken]),
+    MailModule,
+    TypeOrmModule.forFeature([RefreshToken, ResetToken]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
