@@ -1,6 +1,6 @@
 import { Injectable, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { User } from './entities/user.entity';
 
 @Injectable()
@@ -16,6 +16,10 @@ export class UsersService {
       .addSelect('user.passwordHash')
       .where('user.email = :email', { email })
       .getOne();
+  }
+
+  async findByEmail(email: string): Promise<User | null> {
+    return this.userRepository.findOneBy({ email });
   }
 
   async findById(id: string): Promise<User | null> {
@@ -40,5 +44,16 @@ export class UsersService {
       }
       throw err;
     }
+  }
+
+  async resetPassword(
+    id: string,
+    passwordHash: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const repository = manager
+      ? manager.withRepository(this.userRepository)
+      : this.userRepository;
+    await repository.update(id, { passwordHash });
   }
 }
