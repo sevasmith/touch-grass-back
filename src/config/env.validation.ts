@@ -25,4 +25,8 @@ export const envValidationSchema = Joi.object({
   CORS_ORIGINS: Joi.string().required(),
 
   OAUTH_LOGIN_TOKEN_TTL: Joi.string().required(),
+
+  GOOGLE_OAUTH_CLIENT_ID: Joi.string().required(),
+  GOOGLE_OAUTH_CLIENT_SECRET: Joi.string().required(),
+  GOOGLE_CALLBACK_URL: Joi.string().uri().required(),
 });

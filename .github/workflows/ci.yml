@@ -137,6 +137,9 @@ jobs:
           MAIL_FROM_EMAIL: ${{ vars.MAIL_FROM_EMAIL }}
           MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
           CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ vars.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_CALLBACK_URL: ${{ vars.GOOGLE_CALLBACK_URL }}
 
 
   docker-build:

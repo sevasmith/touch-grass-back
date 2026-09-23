@@ -4,10 +4,12 @@ import {
   Post,
   Body,
   Req,
+  Res,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { Public } from '../common/decorators/public.decorator';
 import { Throttle } from '@nestjs/throttler';
@@ -18,6 +20,9 @@ import { RefreshDto } from './dto/refresh.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
+import { OAuthAccountDto } from './dto/oauth-account.dto';
+import { AuthGuard } from '@nestjs/passport';
+import { UseGuards } from '@nestjs/common';
 
 @Controller('auth')
 export class AuthController {
@@ -71,6 +76,21 @@ export class AuthController {
   @Post('oauth/exchange')
   exchangeToken(@Body() dto: OAuthExchangeDto) {
     return this.authService.exchangeOAuthLoginToken(dto);
+  }
+
+  @Public()
+  @UseGuards(AuthGuard('google'))
+  @Get('google')
+  googleAuth() {}
+
+  @Public()
+  @UseGuards(AuthGuard('google'))
+  @Get('google/callback')
+  async googleCallback(@Req() req: Request, @Res() res: Response) {
+    const redirectUrl = await this.authService.completeOAuthLogin(
+      req.user as OAuthAccountDto,
+    );
+    return res.redirect(redirectUrl);
   }
 
   @Get('me')

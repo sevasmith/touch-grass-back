@@ -406,4 +406,10 @@ export class AuthService {
 
     return this.issueTokens(user);
   }
+
+  async completeOAuthLogin(profile: OAuthAccountDto): Promise<string> {
+    const user = await this.findOrCreateOAuthUser(profile);
+    const loginToken = await this.issueOAuthLoginToken(user);
+    return `${this.configService.get<string>('FRONTEND_URL')}/oauth/complete?token=${loginToken}`;
+  }
 }

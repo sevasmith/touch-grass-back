@@ -46,6 +46,8 @@ All of these are required — the app validates them at boot (via a Joi schema) 
 | `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. |
 | `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset emails |
 | `MAIL_FROM_EMAIL`, `MAIL_FROM_NAME` | Sender identity for outgoing emails |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth 2.0 client credentials, from Google Cloud Console → APIs & Services → Credentials |
+| `GOOGLE_CALLBACK_URL` | Must exactly match the redirect URI registered for the client above (e.g. `http://localhost:6767/auth/google/callback` locally) |
 | `PORT` | Optional, defaults to `6767` |
 | `NODE_ENV` | Optional, defaults to `development`. Set to `production` to disable verbose validation-error debug messages. |
 
