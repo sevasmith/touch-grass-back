@@ -18,6 +18,14 @@ export class UsersService {
       .getOne();
   }
 
+  async findByIdWithPassword(id: string): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id })
+      .getOne();
+  }
+
   async findByEmail(email: string): Promise<User | null> {
     return this.userRepository.findOneBy({ email });
   }
@@ -54,6 +62,9 @@ export class UsersService {
     const repository = manager
       ? manager.withRepository(this.userRepository)
       : this.userRepository;
-    await repository.update(id, { passwordHash });
+    await repository.update(id, {
+      passwordHash,
+      passwordChangedAt: new Date(),
+    });
   }
 }
