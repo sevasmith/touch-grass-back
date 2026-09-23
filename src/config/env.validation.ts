@@ -23,4 +23,6 @@ export const envValidationSchema = Joi.object({
   PASSWORD_RESET_TTL: Joi.string().required(),
   FRONTEND_URL: Joi.string().uri().required(),
   CORS_ORIGINS: Joi.string().required(),
+
+  OAUTH_LOGIN_TOKEN_TTL: Joi.string().required(),
 });

@@ -67,4 +67,27 @@ export class UsersService {
       passwordChangedAt: new Date(),
     });
   }
+
+  async createOAuthUser(email: string, manager?: EntityManager): Promise<User> {
+    const repository = manager
+      ? manager.withRepository(this.userRepository)
+      : this.userRepository;
+    const user = repository.create({
+      email,
+      passwordHash: null,
+      emailVerified: true,
+    });
+    try {
+      return await repository.save(user);
+    } catch (err) {
+      if (
+        err instanceof QueryFailedError &&
+        'code' in err &&
+        err.code === '23505'
+      ) {
+        throw new ConflictException('Email already exists');
+      }
+      throw err;
+    }
+  }
 }

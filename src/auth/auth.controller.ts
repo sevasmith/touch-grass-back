@@ -17,6 +17,7 @@ import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -63,6 +64,13 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Public()
+  @Post('oauth/exchange')
+  exchangeToken(@Body() dto: OAuthExchangeDto) {
+    return this.authService.exchangeOAuthLoginToken(dto);
   }
 
   @Get('me')

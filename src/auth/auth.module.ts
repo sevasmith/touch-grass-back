@@ -9,6 +9,8 @@ import type { StringValue } from 'ms';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { ResetToken } from './entities/reset-token.entity';
+import { OAuthAccount } from './entities/oauth-account.entity';
+import { OAuthLoginToken } from './entities/oauth-login-token.entity';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { MailModule } from '../mail/mail.module';
@@ -17,7 +19,12 @@ import { MailModule } from '../mail/mail.module';
   imports: [
     UsersModule,
     MailModule,
-    TypeOrmModule.forFeature([RefreshToken, ResetToken]),
+    TypeOrmModule.forFeature([
+      RefreshToken,
+      ResetToken,
+      OAuthAccount,
+      OAuthLoginToken,
+    ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

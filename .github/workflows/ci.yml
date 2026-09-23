@@ -132,6 +132,7 @@ jobs:
           JWT_REFRESH_TTL: ${{ vars.JWT_REFRESH_TTL }}
           PASSWORD_RESET_TTL: ${{ vars.PASSWORD_RESET_TTL }}
           FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          OAUTH_LOGIN_TOKEN_TTL: ${{ vars.OAUTH_LOGIN_TOKEN_TTL }}
           BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
           MAIL_FROM_EMAIL: ${{ vars.MAIL_FROM_EMAIL }}
           MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}

@@ -41,6 +41,7 @@ All of these are required — the app validates them at boot (via a Joi schema) 
 | `JWT_ACCESS_TTL` | Access token lifetime (e.g. `15m`) |
 | `JWT_REFRESH_TTL` | Refresh token lifetime (e.g. `30d`) |
 | `PASSWORD_RESET_TTL` | How long a password-reset link stays valid (e.g. `15m`) |
+| `OAUTH_LOGIN_TOKEN_TTL` | How long the short-lived, single-use OAuth login handoff code stays valid (e.g. `60s`) |
 | `FRONTEND_URL` | Used to build the link sent in the password-reset email (`${FRONTEND_URL}/reset-password?token=...`) |
 | `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. |
 | `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset emails |
