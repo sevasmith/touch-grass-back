@@ -7,6 +7,7 @@ import {
 import { isUUID } from 'class-validator';
 import { UsersService } from '../users/users.service';
 import { MailService } from '../mail/mail.service';
+import { EmailVerificationService } from './email-verification.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { hash, verify } from 'argon2';
@@ -38,6 +39,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly mailService: MailService,
+    private readonly emailVerificationService: EmailVerificationService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
     @InjectRepository(RefreshToken)
@@ -83,6 +85,13 @@ export class AuthService {
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const passwordHash = await hash(dto.password);
     const user = await this.usersService.create(dto.email, passwordHash);
+
+    try {
+      await this.emailVerificationService.issue(user);
+    } catch (err) {
+      this.logger.error('Failed to send email verification code', err);
+    }
+
     return this.issueTokens(user);
   }
 

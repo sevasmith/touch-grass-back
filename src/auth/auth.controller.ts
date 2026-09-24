@@ -13,7 +13,9 @@ import {
 import type { Request } from 'express';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
+import { EmailVerificationService } from './email-verification.service';
 import { Public } from '../common/decorators/public.decorator';
+import { AllowUnverified } from '../common/decorators/allow-unverified.decorator';
 import { Throttle } from '@nestjs/throttler';
 import { LoginDto } from './dto/login.dto';
 import { SignupDto } from './dto/signup.dto';
@@ -21,6 +23,7 @@ import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 import { OAuthAccountDto } from './dto/oauth-account.dto';
 import { GoogleAuthGuard } from './guards/google-auth-guard';
@@ -28,7 +31,10 @@ import { OAuthCallbackExceptionFilter } from './filters/oauth-callback-exception
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly emailVerificationService: EmailVerificationService,
+  ) {}
 
   @Public()
   @Post('signup')
@@ -96,6 +102,25 @@ export class AuthController {
     return res.redirect(redirectUrl);
   }
 
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @AllowUnverified()
+  @Post('verify-email')
+  verifyEmail(@Req() req: Request, @Body() dto: VerifyEmailDto) {
+    const { id } = req.user as { id: string };
+    return this.emailVerificationService.verify(id, dto.code);
+  }
+
+  @Throttle({ default: { ttl: 900_000, limit: 3 } })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @AllowUnverified()
+  @Post('resend-verification')
+  resendVerification(@Req() req: Request) {
+    const { id } = req.user as { id: string };
+    return this.emailVerificationService.resend(id);
+  }
+
+  @AllowUnverified()
   @Get('me')
   me(@Req() req: Request) {
     return req.user;

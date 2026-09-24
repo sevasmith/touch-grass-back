@@ -42,9 +42,10 @@ All of these are required — the app validates them at boot (via a Joi schema) 
 | `JWT_REFRESH_TTL` | Refresh token lifetime (e.g. `30d`) |
 | `PASSWORD_RESET_TTL` | How long a password-reset link stays valid (e.g. `15m`) |
 | `OAUTH_LOGIN_TOKEN_TTL` | How long the short-lived, single-use OAuth login handoff token stays valid (e.g. `60s`). See [Sign in with Google](#sign-in-with-google-oauth). |
+| `EMAIL_VERIFICATION_TTL` | How long an emailed verification code stays valid (e.g. `10m`). See [Email verification](#email-verification-otp). |
 | `FRONTEND_URL` | Base URL of the frontend. Used to build the password-reset link (`${FRONTEND_URL}/reset-password?token=...`) **and** where the Google login redirects the browser afterwards (`${FRONTEND_URL}/oauth/complete?token=...` or `?error=...`). The scheme must match how the frontend is really served — `http://localhost:3000` locally, not `https://`, unless you run local HTTPS. |
 | `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. |
-| `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset emails |
+| `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset and email-verification emails |
 | `MAIL_FROM_EMAIL`, `MAIL_FROM_NAME` | Sender identity for outgoing emails |
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth 2.0 client credentials, from Google Cloud Console → APIs & Services → Credentials. The secret is the only real secret of the two — keep it out of git. |
 | `GOOGLE_CALLBACK_URL` | The backend URL Google sends the user back to (e.g. `http://localhost:6767/auth/google/callback` locally). Must match, character for character, a redirect URI registered on the Google client, or Google shows `redirect_uri_mismatch`. |
@@ -64,7 +65,8 @@ There are two ways to sign in — email + password, and Google — and **both en
   { "statusCode": 401, "message": "Invalid credentials", "error": "Unauthorized" }
   ```
   For validation errors (400s), `message` is an array of strings, one per failed field.
-- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `login` is capped at 5/minute, `forgot-password` at 3/15 minutes. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)).
+- **Three access tiers.** Every route is one of: `@Public()` (no token needed), `@AllowUnverified()` (valid access token, but the email may still be unverified), or the default (valid access token **and** a verified email — otherwise `403 Email not verified`). See [Email verification](#email-verification-otp) for why there are three and where each route sits.
+- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `login` is capped at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute and `resend-verification` at 3/15 minutes. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address.
 - **Token ids are validated before any database lookup.** Every opaque token (`refresh`, reset, OAuth handoff) is `id.secret` where `id` is a UUID. A token whose `id` isn't a UUID is rejected as an invalid token (`401`, or `204` for `logout`) instead of reaching Postgres.
 - **Accounts can have no password.** A user created through Google has `passwordHash = NULL` until they set one via *forgot password → reset password*. Password login for such an account returns the same generic `401 Invalid credentials`.
 
@@ -186,11 +188,11 @@ Identity is stored in `oauth_accounts` as **`(provider, providerAccountId)`** wi
 | Not linked · no local user has that email | **Create** the user (`passwordHash = NULL`, `emailVerified = true`) and its `oauth_accounts` row in **one transaction**. |
 | Google says the email is **not** verified | **Refused** → `401` → `?error=access_denied`. Nothing is linked or created, so an unproven email can never become a verified account here. (A `(google, sub)` pair that is *already* linked still logs in.) |
 
-**Why refuse to link to an unverified local account?** Password sign-up does not verify the email. Without this rule: an attacker registers `victim@gmail.com` with a password they choose, the real owner later clicks "Sign in with Google", the backend links Google to *the attacker's* account — and the attacker still knows the password. Requiring the local email to be verified means only someone who proved they own the inbox can be linked.
+**Why refuse to link to an unverified local account?** A password account starts with `emailVerified = false` until the owner enters the emailed code (see [Email verification](#email-verification-otp)), so the address is unproven. Without this rule: an attacker registers `victim@gmail.com` with a password they choose, the real owner later clicks "Sign in with Google", the backend links Google to *the attacker's* account — and the attacker still knows the password. Requiring the local email to be verified means only someone who proved they own the inbox can be linked.
 
 Alternatives considered: silently wiping the password and sessions of the unverified account on link (works, but destroys real users' passwords and needs extra token-revocation logic), or a separate "link your account" screen (more surface). Refusing is the smallest safe behavior.
 
-> **Current limitation:** email verification (OTP) is **not implemented yet**, so no password account has `emailVerified = true`. Until it is, signing in with Google to an email that already has a password account always ends in `?error=email_already_in_use`. Once the OTP flow sets `emailVerified = true`, linking starts working with no change to this code. Accounts created *through Google* are verified from the start.
+> **How this connects to email verification:** a password account becomes linkable the moment its owner verifies the emailed code — no change to this code was needed. Until then (and for accounts that never verify), signing in with Google to that email ends in `?error=email_already_in_use`. Accounts created *through Google* are verified from the start. Note that a completed *password reset* does **not** currently mark the email verified (see `docs/known-gaps.md`).
 
 **Concurrency:** two simultaneous first-time callbacks (double click) race on the unique constraints. The loser's failure is caught and it re-reads the account the winner created, so both requests end up logged in as the same single user.
 
@@ -256,10 +258,155 @@ You land on `?error=access_denied` — look at the backend log line just before 
 | `oauth_login_tokens` | One row per callback: hashed handoff token, `expiresAt`, `usedAt` (set atomically on exchange). |
 | `refresh_tokens` | A new row when the exchange issues tokens (as with every login). |
 
+## Email verification (OTP)
+
+Password sign-up proves nothing about the email address: anyone can register `someone-else@gmail.com`. Verification fixes that by emailing a 6-digit code that only the inbox owner can read. This section explains the whole cycle **and why each piece exists**. The per-endpoint reference is further down.
+
+### For frontend developers (the short version)
+
+1. `POST /auth/signup` as before. You get `{ accessToken, refreshToken }` **and** the backend emails a 6-digit code. Treat the new user as **unverified**.
+2. Show a "enter the code we emailed you" screen. Submit it with `POST /auth/verify-email` `{ "code": "123456" }` and the normal `Authorization: Bearer` header. `204` means the email is now verified.
+3. Offer a "resend code" button → `POST /auth/resend-verification` (no body). It is limited to one per minute.
+4. **No re-login or token refresh is needed after verifying** — the access token you already hold starts working on every route immediately.
+5. For a user who logs in later (`login`, Google), call `GET /auth/me`: it returns `{ id, email, emailVerified }`. If `emailVerified` is `false`, send them to the code screen.
+6. Any other protected route called by an unverified user answers `403` with `message: "Email not verified"`. Handle that globally by routing to the code screen too.
+
+```ts
+// after signup, or when /auth/me says emailVerified === false
+const res = await fetch(`${API_URL}/auth/verify-email`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
+  body: JSON.stringify({ code }),
+});
+// 204 → verified. 401 → read `message`: wrong code / expired / too many attempts (offer "resend").
+```
+
+### The full cycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as Frontend
+    participant API as Backend (this repo)
+    participant DB as Postgres
+    participant M as Brevo (email)
+    participant U as User's inbox
+
+    F->>API: POST /auth/signup
+    API->>DB: create user (emailVerified = false)
+    Note over API: EmailVerificationService.issue()
+    API->>DB: invalidate old codes, insert hash(code) + expiresAt
+    API->>M: send code (a failure is logged, signup still succeeds)
+    M-->>U: "Your verification code: 123456"
+    API-->>F: 201 { accessToken, refreshToken }
+    F->>API: POST /auth/verify-email { code } (+ Bearer token)
+    Note over API: guards let it through: @AllowUnverified()
+    API->>DB: claim ONE attempt (atomic, capped at 5)
+    API->>API: compare hash(code) in constant time
+    API->>DB: one transaction: mark code used + users.emailVerified = true
+    API-->>F: 204
+    F->>API: any protected route (same access token)
+    Note over API: JwtStrategy reads emailVerified from the DB, EmailVerifiedGuard lets it in
+    API-->>F: 200
+```
+
+Where the code lives:
+
+| Step | Code |
+|---|---|
+| Send the code on signup | `AuthService.signup` → `EmailVerificationService.issue` |
+| Generate, hash, store, email a code | `EmailVerificationService.issue` (`src/auth/email-verification.service.ts`) |
+| Check a submitted code, verify the user | `EmailVerificationService.verify` |
+| Send another code (cooldown, error handling) | `EmailVerificationService.resend` |
+| The email itself (HTML + text) | `MailService.sendEmailVerificationCode` (`src/mail/mail.service.ts`) |
+| Flip `emailVerified` | `UsersService.markEmailVerified` |
+| Storage | `VerificationCode` entity → table `email_verification_codes` (`src/auth/entities/email-verification-code.entity.ts`) |
+| "Verified users only" enforcement | `EmailVerifiedGuard` (`src/auth/guards/email-verified.guard.ts`) + `JwtStrategy.validate` |
+| Opt a route out of that enforcement | `@AllowUnverified()` (`src/common/decorators/allow-unverified.decorator.ts`) |
+| Endpoints + request validation | `AuthController`, `src/auth/dto/verify-email.dto.ts` |
+
+### 1. Three access tiers, and why the verify endpoints aren't just `@Public()`
+
+| Tier | Decorator | Needs a valid access token | Needs `emailVerified = true` | Routes |
+|---|---|---|---|---|
+| Public | `@Public()` | no | no | signup, login, logout, refresh, forgot/reset-password, Google routes, oauth/exchange, `/health` |
+| Unverified allowed | `@AllowUnverified()` | **yes** | no | `POST /auth/verify-email`, `POST /auth/resend-verification`, `GET /auth/me` |
+| Default | *(none)* | **yes** | **yes** | everything else, including every route added in the future |
+
+The verify and resend endpoints have to know **whose** code they are dealing with. Because the user already holds an access token from signup, the token identifies them, so those routes need a token but must not demand verification (that would be a chicken-and-egg problem). That is exactly what the middle tier is. The default is deliberately the *strict* tier: a developer adding a new route gets "verified users only" for free and has to opt out on purpose.
+
+> Alternative considered: a public `verify` endpoint taking `{ email, code }`. It would allow verifying from a different device than the one that signed up, but it lets anyone on the internet hammer codes for any email address (account-enumeration and brute-force surface). Reusing the session avoids all of that.
+
+### 2. Signup and login still hand out tokens to unverified users
+
+We did not change `signup`/`login` to withhold tokens. An unverified session is simply **confined** by the guard to the three routes above. This keeps the API contract the frontend already uses and is what makes the verify endpoints identifiable (section 1). `refresh` and `logout` stay public, so an unverified user can keep and end a session normally.
+
+### 3. How enforcement works (and why no re-login is needed)
+
+- `JwtStrategy.validate()` already loads the user from the database on every request (to check `passwordChangedAt`). It now also returns `emailVerified` from that row.
+- `EmailVerifiedGuard` is registered as a **second global guard right after `JwtAuthGuard`** (`auth.module.ts`). Nest runs guards in registration order, so `req.user` is already filled in. It skips `@Public()` and `@AllowUnverified()` routes and otherwise throws `403 Email not verified`. If `req.user` is missing it also rejects, so it fails closed.
+- **The flag comes from the database, not from a claim inside the JWT.** A claim would be stale until the token expires or is refreshed; reading the row means the token the user already holds works the instant they verify, and there is no re-issue step.
+- It is a separate guard rather than an extra branch in `JwtAuthGuard` because that guard returns a Passport result that may be a promise/observable; keeping the two concerns apart keeps both small.
+
+### 4. The code and how it is stored
+
+- **6 digits**, generated with `crypto.randomInt(0, 1_000_000)` and zero-padded, so all 1,000,000 values (including `000123`) are possible.
+- Stored in its own table, `email_verification_codes`, next to (not on) `users`: `codeHash`, `expiresAt`, `usedAt`, `invalidatedAt`, `attempts`, `createdAt`. A separate table keeps history, makes "invalidate the previous code" a simple update, and allows per-code attempt counting. Same shape as `reset_tokens`.
+- Only a **SHA-256 hash** is stored, never the code. Be honest about what that buys: a hash of a 6-digit number can be brute-forced by anyone who can read the database, so the hash is hygiene, not protection. The real protections are the short lifetime (`EMAIL_VERIFICATION_TTL`) and the attempt cap below. We deliberately did not add a secret "pepper" env var for this.
+- **At most one active code per user.** `issue()` invalidates every unused, non-invalidated code and inserts the new one in one transaction. Requesting a new code kills the old one.
+- The code lives for `EMAIL_VERIFICATION_TTL`. It is not a link with a long-lived token like password reset, because the user types it on a screen they already have open.
+
+### 5. Verifying a code — and why there is an `attempts` column
+
+Opaque `id.secret` tokens (refresh, reset, OAuth handoff) carry 32 random bytes, so single-use is enough: nobody can guess one. A 6-digit code can be guessed. "Only usable once" only stops someone reusing a *correct* code; it does nothing about trying `000000`, `000001`, … So `verify` adds a cap on wrong guesses. In order:
+
+1. Load the user. Already verified → `204` (idempotent).
+2. Load the user's newest active code. None → `401 Invalid or expired verification code`. Past `expiresAt` → `401 Verification code expired`.
+3. **Claim an attempt first.** One atomic `UPDATE … SET attempts = attempts + 1 WHERE the code is still active AND attempts < 5`, then check `affected` *before comparing anything*. This is the same **claim-then-act** shape as the other single-use flows, applied to attempts, so many parallel guesses cannot all slip through a check-then-act gap. If nothing was updated the code is invalidated and the answer is `401 Too many attempts, please request a new verification code`. The 5th guess is still allowed (and can succeed); the 6th is the first one refused.
+4. Compare the SHA-256 of the submitted code with the stored hash using `timingSafeEqual`. Wrong → `401 Invalid verification code` (the attempt stays consumed).
+5. Correct → **one database transaction**: mark the code used (conditional `UPDATE … WHERE usedAt IS NULL AND invalidatedAt IS NULL`, checking `affected`) **and** set `users.emailVerified = true`. If either half fails, both roll back — a code can't be burned without verifying the user, or the reverse.
+
+**Deliberate difference from the token flows:** exhausting the attempts only kills that one code. It does **not** revoke the user's sessions the way a replayed refresh or reset token does. A wrong guess is not evidence that a secret leaked, and logging the real owner out because someone typed digits would just be a denial-of-service on them. Don't "harmonise" this.
+
+Rough numbers: 5 guesses against 1,000,000 values is 5 in a million per code, and the resend cooldown (below) limits how many fresh codes can be requested per hour.
+
+### 6. Resending a code
+
+`resend`: user gone → `401`; already verified → `204` no-op; newest code created less than **60 seconds** ago → `429 Please wait a moment before requesting another code` (a database-based, per-user cooldown, on top of the per-IP throttle of 3 per 15 minutes); otherwise `issue()` a fresh code.
+
+**Email failures are handled differently in the two places that send a code**, on purpose:
+- **On signup** the failure is logged and swallowed. The account already exists; failing the request would leave a registered user with no tokens and a confusing error. They can simply hit *resend*.
+- **On resend** the failure is logged and returned as `503 Unable to send the verification email, try again later`. The caller is authenticated and explicitly asked, and there is no account-enumeration concern (it is their own address), so an honest error is more useful than silence. (This is the opposite of `forgot-password`, which must stay silent to avoid leaking which emails exist.)
+
+### 7. Setting it up
+
+- Set `EMAIL_VERIFICATION_TTL` (e.g. `10m`) in `.env`. It is required: the app refuses to boot without it.
+- In CI/deploy it is a GitHub Actions **variable** (not a secret) and must also exist in the ECS task definition.
+- Run `pnpm run migration:run` to create `email_verification_codes`.
+- Email delivery reuses the existing Brevo settings (`BREVO_API_KEY`, `MAIL_FROM_EMAIL`, `MAIL_FROM_NAME`).
+- **Existing users:** every password account created before this feature has `emailVerified = false` and will be confined to the three routes above until they verify (they can log in and use `resend-verification`). This is correct — their email was never proven — but tell the frontend team.
+
+### 8. Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| No email arrives | Look for `Failed to send email verification code` in the backend log (Brevo key or sender not valid). The user can retry with `resend-verification`. |
+| `resend-verification` → `429` right after signup | The 60-second cooldown is counted from the code created at signup. |
+| Every protected route answers `403 Email not verified` | Expected for an unverified user. Verify, or (locally) set `emailVerified = true` on the row. |
+| `401 Too many attempts…` | 5 wrong guesses used up that code. Call `resend-verification` for a new one. |
+| App won't boot with a Joi error mentioning `EMAIL_VERIFICATION_TTL` | The variable is missing from `.env` (or from CI/the deployed environment). |
+
+### 9. Data touched
+
+| Table | When |
+|---|---|
+| `users` | `emailVerified` set to `true` by a successful `verify-email`. |
+| `email_verification_codes` | One row per issued code (signup, each resend): hashed code, `expiresAt`, `attempts`, `usedAt` (on success), `invalidatedAt` (when replaced, or attempts exhausted). |
+
 ## Endpoints
 
 ### `POST /auth/signup`
-Public. Creates a user and logs them in immediately.
+Public. Creates a user, emails a verification code, and logs them in immediately. **The new user is unverified**: their tokens only reach [`verify-email`, `resend-verification` and `me`](#email-verification-otp) until they verify.
 
 **Body**
 ```json
@@ -270,6 +417,7 @@ Public. Creates a user and logs them in immediately.
 ```json
 { "accessToken": "...", "refreshToken": "..." }
 ```
+A failure to send the email does not change this response; the user can call `resend-verification`.
 
 **Errors**
 | Status | Cause |
@@ -297,6 +445,8 @@ Public. Rate limited: 5/min per IP.
 |---|---|
 | `400` | Validation failed |
 | `401` | Invalid credentials (wrong email or password — same message for both, to avoid leaking which one is wrong). Also returned for accounts that have **no password** (created through Google) — same message on purpose. |
+
+Logging in does **not** require a verified email: an unverified user gets tokens too, but only `verify-email`, `resend-verification` and `me` will answer them (everything else is `403 Email not verified`).
 | `429` | Rate limit exceeded |
 
 ---
@@ -393,6 +543,44 @@ This is also how a user who signed up with Google (no password yet) can **add a 
 
 ---
 
+### `POST /auth/verify-email`
+**Requires auth, but not a verified email** (`@AllowUnverified()`). Send `Authorization: Bearer <accessToken>`. Rate limited: 5/min per IP. Full explanation: [Email verification](#email-verification-otp).
+
+**Body**
+```json
+{ "code": "123456" }
+```
+`code` must be exactly 6 digits, sent as a string (leading zeros matter).
+
+**Success — `204 No Content`** — the email is verified. Also returned if it already was. The access token the user already holds works on every route right away; no refresh needed.
+
+**Errors**
+| Status | Cause |
+|---|---|
+| `400` | Validation failed (missing, not a string, not exactly 6 digits) |
+| `401` | `Invalid or expired verification code` — there is no active code for this user (never requested, already used, or replaced by a newer one) |
+| `401` | `Verification code expired` (lifetime is `EMAIL_VERIFICATION_TTL`) |
+| `401` | `Invalid verification code` — wrong code; consumes one of the code's 5 attempts |
+| `401` | `Too many attempts, please request a new verification code` — the 5 attempts are used up and the code is now dead. Call `resend-verification`. This does **not** log the user out. |
+| `401` | Missing/invalid/expired access token, or the user no longer exists |
+| `429` | Rate limit exceeded |
+
+---
+
+### `POST /auth/resend-verification`
+**Requires auth, but not a verified email** (`@AllowUnverified()`). Rate limited: 3 requests/15 min per IP, plus a per-user cooldown of 60 seconds between codes. No body.
+
+**Success — `204 No Content`** — a new code was emailed and **every earlier code stopped working**. Also `204` (and nothing is sent) if the email is already verified.
+
+**Errors**
+| Status | Cause |
+|---|---|
+| `401` | Missing/invalid/expired access token, or the user no longer exists |
+| `429` | Rate limit exceeded, **or** `Please wait a moment before requesting another code` (the previous code was issued less than 60 s ago) |
+| `503` | `Unable to send the verification email, try again later` — the email provider failed. A new code row was still created, so the 60 s cooldown applies to the retry. |
+
+---
+
 ### `GET /auth/google`
 Public. Starts the Google login. **Must be reached by a browser navigation**, not `fetch` — see [Sign in with Google](#sign-in-with-google-oauth).
 
@@ -447,12 +635,13 @@ Same shape and lifetimes as `POST /auth/login`; `lastLoginAt` is updated.
 ---
 
 ### `GET /auth/me`
-**Requires auth** — the only endpoint not marked public. Send `Authorization: Bearer <accessToken>`.
+**Requires auth, but not a verified email** (`@AllowUnverified()`), so the frontend can ask an unverified user's state. Send `Authorization: Bearer <accessToken>`.
 
 **Success — `200 OK`**
 ```json
-{ "id": "uuid", "email": "user@example.com" }
+{ "id": "uuid", "email": "user@example.com", "emailVerified": true }
 ```
+If `emailVerified` is `false`, send the user to the code screen.
 
 **Errors**
 | Status | Cause |
