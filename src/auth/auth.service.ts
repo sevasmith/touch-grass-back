@@ -1,4 +1,10 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { isUUID } from 'class-validator';
 import { UsersService } from '../users/users.service';
 import { MailService } from '../mail/mail.service';
 import { JwtService } from '@nestjs/jwt';
@@ -10,11 +16,15 @@ import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { OAuthAccountDto } from './dto/oauth-account.dto';
+import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 import { User } from '../users/entities/user.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { ResetToken } from './entities/reset-token.entity';
+import { OAuthAccount } from './entities/oauth-account.entity';
+import { OAuthLoginToken } from './entities/oauth-login-token.entity';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository, IsNull } from 'typeorm';
+import { DataSource, Repository, IsNull, QueryFailedError } from 'typeorm';
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'crypto';
 import ms from 'ms';
 import type { StringValue } from 'ms';
@@ -34,6 +44,10 @@ export class AuthService {
     private readonly refreshTokenRepository: Repository<RefreshToken>,
     @InjectRepository(ResetToken)
     private readonly resetTokenRepository: Repository<ResetToken>,
+    @InjectRepository(OAuthAccount)
+    private readonly oAuthAccountRepository: Repository<OAuthAccount>,
+    @InjectRepository(OAuthLoginToken)
+    private readonly oAuthLoginTokenRepository: Repository<OAuthLoginToken>,
   ) {}
 
   private async issueTokens(
@@ -76,7 +90,11 @@ export class AuthService {
     dto: LoginDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const user = await this.usersService.findByEmailWithPassword(dto.email);
-    if (!user || !(await verify(user.passwordHash, dto.password))) {
+    if (
+      !user ||
+      !user.passwordHash ||
+      !(await verify(user.passwordHash, dto.password))
+    ) {
       throw new UnauthorizedException('Invalid credentials');
     }
     await this.usersService.updateLastLoginAt(user.id);
@@ -85,6 +103,7 @@ export class AuthService {
 
   async logout(dto: LogoutDto): Promise<void> {
     const [id] = dto.refreshToken.split('.');
+    if (!isUUID(id)) return;
     await this.refreshTokenRepository.update(id, { revokedAt: new Date() });
   }
 
@@ -92,7 +111,7 @@ export class AuthService {
     dto: RefreshDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const [id, secret] = dto.refreshToken.split('.');
-    if (!id || !secret) {
+    if (!id || !secret || !isUUID(id)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
     const refreshTokenRecord = await this.refreshTokenRepository.findOne({
@@ -188,7 +207,7 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto): Promise<void> {
     const [id, secret] = dto.token.split('.');
 
-    if (!id || !secret) {
+    if (!id || !secret || !isUUID(id)) {
       throw new UnauthorizedException('Invalid reset token');
     }
 
@@ -204,7 +223,7 @@ export class AuthService {
       tokenRecord.userId,
     );
 
-    if (user && (await verify(user.passwordHash, dto.password))) {
+    if (user?.passwordHash && (await verify(user.passwordHash, dto.password))) {
       throw new UnauthorizedException(
         'New password must be different from your current password',
       );
@@ -257,5 +276,162 @@ export class AuthService {
           { revokedAt: new Date() },
         );
     });
+  }
+
+  async findOrCreateOAuthUser(dto: OAuthAccountDto): Promise<User> {
+    const existingAccount = await this.oAuthAccountRepository.findOne({
+      where: {
+        provider: dto.provider,
+        providerAccountId: dto.providerAccountId,
+      },
+    });
+
+    if (existingAccount) {
+      const user = await this.usersService.findById(existingAccount.userId);
+      if (!user) {
+        throw new UnauthorizedException('Invalid OAuth account');
+      }
+      return user;
+    }
+
+    if (dto.emailVerified) {
+      const existingUser = await this.usersService.findByEmail(dto.email);
+      if (existingUser) {
+        if (!existingUser.emailVerified) {
+          throw new ConflictException(
+            'An account must be first verified, before linking any auth providers',
+          );
+        }
+        try {
+          await this.oAuthAccountRepository.insert({
+            userId: existingUser.id,
+            provider: dto.provider,
+            providerAccountId: dto.providerAccountId,
+          });
+        } catch (err) {
+          if (!(
+            err instanceof QueryFailedError &&
+            'code' in err &&
+            err.code === '23505'
+          )) {
+            throw err;
+          }
+        }
+        return existingUser;
+      }
+    } else {
+      throw new UnauthorizedException(
+        'The email is unverified by the provider',
+      );
+    }
+
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        const user = await this.usersService.createOAuthUser(
+          dto.email,
+          manager,
+        );
+        await manager.withRepository(this.oAuthAccountRepository).insert({
+          userId: user.id,
+          provider: dto.provider,
+          providerAccountId: dto.providerAccountId,
+        });
+        return user;
+      });
+    } catch (err) {
+      if (
+        err instanceof ConflictException ||
+        (err instanceof QueryFailedError &&
+          'code' in err &&
+          err.code === '23505')
+      ) {
+        const account = await this.oAuthAccountRepository.findOneBy({
+          provider: dto.provider,
+          providerAccountId: dto.providerAccountId,
+        });
+        const user = account
+          ? await this.usersService.findById(account.userId)
+          : null;
+        if (user) {
+          return user;
+        }
+      }
+      throw err;
+    }
+  }
+
+  async issueOAuthLoginToken(user: User): Promise<string> {
+    const id = randomUUID();
+    const secret = randomBytes(32).toString('base64url');
+    const loginToken = `${id}.${secret}`;
+
+    const tokenHash = createHash('sha256').update(loginToken).digest('hex');
+    const loginTokenTtl = this.configService.get<string>(
+      'OAUTH_LOGIN_TOKEN_TTL',
+    ) as StringValue;
+
+    const expiresAt = new Date(Date.now() + ms(loginTokenTtl));
+
+    await this.oAuthLoginTokenRepository.insert({
+      id,
+      userId: user.id,
+      tokenHash,
+      expiresAt,
+    });
+
+    return loginToken;
+  }
+
+  async exchangeOAuthLoginToken(
+    dto: OAuthExchangeDto,
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const [id, secret] = dto.token.split('.');
+
+    if (!id || !secret || !isUUID(id)) {
+      throw new UnauthorizedException('Invalid OAuth login token');
+    }
+
+    const tokenRecord = await this.oAuthLoginTokenRepository.findOne({
+      where: { id },
+    });
+
+    if (!tokenRecord) {
+      throw new UnauthorizedException('Invalid OAuth login token');
+    }
+
+    const providedHash = createHash('sha256').update(dto.token).digest();
+    const savedHash = Buffer.from(tokenRecord.tokenHash, 'hex');
+
+    if (!timingSafeEqual(providedHash, savedHash)) {
+      throw new UnauthorizedException('Invalid OAuth login token');
+    }
+
+    if (tokenRecord.expiresAt < new Date()) {
+      throw new UnauthorizedException('OAuth login token expired');
+    }
+
+    const { affected } = await this.oAuthLoginTokenRepository.update(
+      { id, usedAt: IsNull() },
+      { usedAt: new Date() },
+    );
+
+    if (!affected) {
+      throw new UnauthorizedException('OAuth login token already used');
+    }
+
+    const user = await this.usersService.findById(tokenRecord.userId);
+
+    if (!user) {
+      throw new UnauthorizedException('Invalid OAuth login token');
+    }
+
+    await this.usersService.updateLastLoginAt(user.id);
+    return this.issueTokens(user);
+  }
+
+  async completeOAuthLogin(profile: OAuthAccountDto): Promise<string> {
+    const user = await this.findOrCreateOAuthUser(profile);
+    const loginToken = await this.issueOAuthLoginToken(user);
+    return `${this.configService.get<string>('FRONTEND_URL')}/oauth/complete?token=${loginToken}`;
   }
 }

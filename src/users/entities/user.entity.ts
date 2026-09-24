@@ -15,8 +15,8 @@ export class User {
   @Column({ type: 'text', unique: true })
   email: string;
 
-  @Column({ type: 'text', select: false })
-  passwordHash: string;
+  @Column({ type: 'text', select: false, nullable: true })
+  passwordHash: string | null;
 
   @Column({ type: 'boolean', default: false })
   emailVerified: boolean;
