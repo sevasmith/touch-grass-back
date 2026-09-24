@@ -1,4 +1,10 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { isUUID } from 'class-validator';
 import { UsersService } from '../users/users.service';
 import { MailService } from '../mail/mail.service';
 import { JwtService } from '@nestjs/jwt';
@@ -84,7 +90,11 @@ export class AuthService {
     dto: LoginDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const user = await this.usersService.findByEmailWithPassword(dto.email);
-    if (!user || !(await verify(user.passwordHash!, dto.password))) {
+    if (
+      !user ||
+      !user.passwordHash ||
+      !(await verify(user.passwordHash, dto.password))
+    ) {
       throw new UnauthorizedException('Invalid credentials');
     }
     await this.usersService.updateLastLoginAt(user.id);
@@ -93,6 +103,7 @@ export class AuthService {
 
   async logout(dto: LogoutDto): Promise<void> {
     const [id] = dto.refreshToken.split('.');
+    if (!isUUID(id)) return;
     await this.refreshTokenRepository.update(id, { revokedAt: new Date() });
   }
 
@@ -100,7 +111,7 @@ export class AuthService {
     dto: RefreshDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const [id, secret] = dto.refreshToken.split('.');
-    if (!id || !secret) {
+    if (!id || !secret || !isUUID(id)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
     const refreshTokenRecord = await this.refreshTokenRepository.findOne({
@@ -196,7 +207,7 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto): Promise<void> {
     const [id, secret] = dto.token.split('.');
 
-    if (!id || !secret) {
+    if (!id || !secret || !isUUID(id)) {
       throw new UnauthorizedException('Invalid reset token');
     }
 
@@ -212,7 +223,7 @@ export class AuthService {
       tokenRecord.userId,
     );
 
-    if (user && (await verify(user.passwordHash!, dto.password))) {
+    if (user?.passwordHash && (await verify(user.passwordHash, dto.password))) {
       throw new UnauthorizedException(
         'New password must be different from your current password',
       );
@@ -286,6 +297,11 @@ export class AuthService {
     if (dto.emailVerified) {
       const existingUser = await this.usersService.findByEmail(dto.email);
       if (existingUser) {
+        if (!existingUser.emailVerified) {
+          throw new ConflictException(
+            'An account must be first verified, before linking any auth providers',
+          );
+        }
         try {
           await this.oAuthAccountRepository.insert({
             userId: existingUser.id,
@@ -303,6 +319,10 @@ export class AuthService {
         }
         return existingUser;
       }
+    } else {
+      throw new UnauthorizedException(
+        'The email is unverified by the provider',
+      );
     }
 
     try {
@@ -320,9 +340,10 @@ export class AuthService {
       });
     } catch (err) {
       if (
-        err instanceof QueryFailedError &&
-        'code' in err &&
-        err.code === '23505'
+        err instanceof ConflictException ||
+        (err instanceof QueryFailedError &&
+          'code' in err &&
+          err.code === '23505')
       ) {
         const account = await this.oAuthAccountRepository.findOneBy({
           provider: dto.provider,
@@ -366,7 +387,7 @@ export class AuthService {
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const [id, secret] = dto.token.split('.');
 
-    if (!id || !secret) {
+    if (!id || !secret || !isUUID(id)) {
       throw new UnauthorizedException('Invalid OAuth login token');
     }
 
@@ -404,6 +425,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid OAuth login token');
     }
 
+    await this.usersService.updateLastLoginAt(user.id);
     return this.issueTokens(user);
   }
 

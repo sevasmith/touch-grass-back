@@ -21,7 +21,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     profile: Profile,
     done: (err: unknown, user?: OAuthAccountDto) => void,
   ) {
-    const email = profile.emails?.[0]?.value;
+    const email = profile.emails?.[0]?.value?.trim().toLowerCase();
 
     if (!email) {
       return done(new Error('Email not found'));

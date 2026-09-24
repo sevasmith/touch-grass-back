@@ -7,6 +7,8 @@ import {
   Res,
   HttpCode,
   HttpStatus,
+  UseFilters,
+  UseGuards,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import type { Response } from 'express';
@@ -21,8 +23,8 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 import { OAuthAccountDto } from './dto/oauth-account.dto';
-import { AuthGuard } from '@nestjs/passport';
-import { UseGuards } from '@nestjs/common';
+import { GoogleAuthGuard } from './guards/google-auth-guard';
+import { OAuthCallbackExceptionFilter } from './filters/oauth-callback-exception.filter';
 
 @Controller('auth')
 export class AuthController {
@@ -79,12 +81,13 @@ export class AuthController {
   }
 
   @Public()
-  @UseGuards(AuthGuard('google'))
+  @UseGuards(GoogleAuthGuard)
   @Get('google')
   googleAuth() {}
 
   @Public()
-  @UseGuards(AuthGuard('google'))
+  @UseGuards(GoogleAuthGuard)
+  @UseFilters(OAuthCallbackExceptionFilter)
   @Get('google/callback')
   async googleCallback(@Req() req: Request, @Res() res: Response) {
     const redirectUrl = await this.authService.completeOAuthLogin(
