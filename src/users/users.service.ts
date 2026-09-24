@@ -68,6 +68,13 @@ export class UsersService {
     });
   }
 
+  async markEmailVerified(id: string, manager?: EntityManager): Promise<void> {
+    const repository = manager
+      ? manager.withRepository(this.userRepository)
+      : this.userRepository;
+    await repository.update(id, { emailVerified: true });
+  }
+
   async createOAuthUser(email: string, manager?: EntityManager): Promise<User> {
     const repository = manager
       ? manager.withRepository(this.userRepository)
