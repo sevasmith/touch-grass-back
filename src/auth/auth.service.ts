@@ -228,16 +228,6 @@ export class AuthService {
       throw new UnauthorizedException('Invalid reset token');
     }
 
-    const user = await this.usersService.findByIdWithPassword(
-      tokenRecord.userId,
-    );
-
-    if (user?.passwordHash && (await verify(user.passwordHash, dto.password))) {
-      throw new UnauthorizedException(
-        'New password must be different from your current password',
-      );
-    }
-
     const providedHash = createHash('sha256').update(dto.token).digest();
     const savedHash = Buffer.from(tokenRecord.tokenHash, 'hex');
 
