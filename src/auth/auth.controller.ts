@@ -33,7 +33,9 @@ import {
   LOGIN_THROTTLE,
   RESEND_VERIFICATION_THROTTLE,
   VERIFY_EMAIL_THROTTLE,
+  CHANGE_PASSWORD_THROTTLE,
 } from './auth.constants';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -83,6 +85,14 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @Throttle(CHANGE_PASSWORD_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @Post('change-password')
+  changePassword(@Body() dto: ChangePasswordDto, @Req() req: Request) {
+    const { id } = req.user as { id: string };
+    return this.authService.changePassword(id, dto);
   }
 
   @HttpCode(HttpStatus.OK)

@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -41,6 +43,7 @@ import {
   FORGOT_PASSWORD_MIN_MS,
   PASSWORD_RESET_COOLDOWN_MS,
 } from './auth.constants';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Injectable()
 export class AuthService {
@@ -322,6 +325,50 @@ export class AuthService {
           { revokedAt: new Date() },
         );
     });
+  }
+
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const user = await this.usersService.findByIdWithPassword(userId);
+
+    if (!user) throw new UnauthorizedException('Unauthorized access');
+
+    if (!user.passwordHash) {
+      throw new BadRequestException(
+        'User is created with third party provider, no password is set',
+      );
+    }
+
+    const passwordValid = await verify(user.passwordHash, dto.password);
+
+    if (!passwordValid) {
+      throw new ForbiddenException('Invalid current password');
+    }
+
+    if (dto.password === dto.newPassword) {
+      throw new BadRequestException(
+        'New password must differ from the previous one',
+      );
+    }
+
+    const newPasswordHash = await hash(dto.newPassword);
+
+    await this.dataSource.transaction(async (manager) => {
+      await this.usersService.resetPassword(userId, newPasswordHash, manager);
+      await manager
+        .withRepository(this.refreshTokenRepository)
+        .update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+      await manager
+        .withRepository(this.resetTokenRepository)
+        .update(
+          { userId, usedAt: IsNull(), invalidatedAt: IsNull() },
+          { invalidatedAt: new Date() },
+        );
+    });
+
+    return this.issueTokens(user);
   }
 
   async findOrCreateOAuthUser(dto: OAuthAccountDto): Promise<User> {

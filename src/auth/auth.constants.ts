@@ -23,3 +23,4 @@ export const VERIFY_EMAIL_THROTTLE = { default: { ttl: 60_000, limit: 5 } };
 export const RESEND_VERIFICATION_THROTTLE = {
   default: { ttl: 900_000, limit: 3 },
 };
+export const CHANGE_PASSWORD_THROTTLE = { default: { ttl: 60_000, limit: 5 } };

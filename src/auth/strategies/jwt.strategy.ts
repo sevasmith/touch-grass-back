@@ -32,7 +32,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     if (!user) throw new UnauthorizedException();
     if (
       user.passwordChangedAt &&
-      payload.iat * 1000 < user.passwordChangedAt.getTime()
+      payload.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)
     ) {
       throw new UnauthorizedException();
     }
