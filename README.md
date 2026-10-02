@@ -60,13 +60,14 @@ There are two ways to sign in — email + password, and Google — and **both en
 - **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one stops working immediately after use.
 - If a refresh token is reused after being invalidated (revoked or already-rotated), the backend treats that as a possible compromise and revokes **all** of that user's active refresh tokens — every session gets logged out, not just the one making the suspicious request.
 - Resetting a password revokes all of the user's refresh tokens *and* invalidates any access token issued before the reset (even if that access token hasn't technically expired yet) — so a password reset is effectively an instant global logout.
+- **Changing a password** while logged in (`POST /auth/change-password`) does the same to every *other* session, but the device that made the change gets a fresh `{ accessToken, refreshToken }` pair in the response and stays logged in. The frontend must replace its stored tokens with the ones in that response. Access tokens are compared against the change at one-second granularity, so a token issued in the same second as the change is accepted.
 - Standard error shape for all thrown exceptions (from Nest's default exception filter):
   ```json
   { "statusCode": 401, "message": "Invalid credentials", "error": "Unauthorized" }
   ```
   For validation errors (400s), `message` is an array of strings, one per failed field.
 - **Three access tiers.** Every route is one of: `@Public()` (no token needed), `@AllowUnverified()` (valid access token, but the email may still be unverified), or the default (valid access token **and** a verified email — otherwise `403 Email not verified`). See [Email verification](#email-verification-otp) for why there are three and where each route sits.
-- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `login` is capped at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute and `resend-verification` at 3/15 minutes. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address.
+- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `login` is capped at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address.
 - **Token ids are validated before any database lookup.** Every opaque token (`refresh`, reset, OAuth handoff) is `id.secret` where `id` is a UUID. A token whose `id` isn't a UUID is rejected as an invalid token (`401`, or `204` for `logout`) instead of reaching Postgres.
 - **Accounts can have no password.** A user created through Google has `passwordHash = NULL` until they set one via *forgot password → reset password*. Password login for such an account returns the same generic `401 Invalid credentials`.
 
@@ -532,7 +533,6 @@ Public. Uses the token from the link sent by `forgot-password`.
 |---|---|
 | `400` | Validation failed |
 | `401` | `Invalid reset token` — malformed (including an `id` that isn't a UUID), unrecognized, or doesn't match the stored hash |
-| `401` | `New password must be different from your current password` (never returned for accounts that have no password yet) |
 | `401` | `Reset token expired` |
 | `401` | `Reset token already used` — the token was already successfully consumed (this also revokes all of the user's active sessions, since it may indicate the link leaked) |
 | `401` | `This reset link has been replaced by a newer request` — the user requested another reset link after this one was sent; this one is now stale. No session revocation in this case, since nothing was actually compromised. |
@@ -540,6 +540,35 @@ Public. Uses the token from the link sent by `forgot-password`.
 Frontend note: `already used` and `replaced by a newer request` are deliberately different messages — show the user something accurate rather than a generic "invalid link" for both, since the second case just means "check your most recent email."
 
 This is also how a user who signed up with Google (no password yet) can **add a password**: `forgot-password` → `reset-password`. Afterwards both login methods work.
+
+---
+
+### `POST /auth/change-password`
+**Requires auth and a verified email** (the default tier). Send `Authorization: Bearer <accessToken>`. Rate limited: 5 requests/minute per IP.
+
+For a logged-in user who knows their current password. (Someone who forgot it uses `forgot-password` → `reset-password` instead.)
+
+**Body**
+```json
+{ "password": "current password", "newPassword": "at least 8 chars, max 72" }
+```
+
+**Success — `200 OK`** — a fresh token pair for the device that made the request:
+```json
+{ "accessToken": "...", "refreshToken": "..." }
+```
+The password is changed and **every other session is logged out**: all of the user's refresh tokens are revoked and every access token issued before the change stops working. Any outstanding reset link is invalidated too. The frontend must store the returned tokens in place of the old ones, because the old pair no longer works on this device either.
+
+**Errors**
+| Status | Cause |
+|---|---|
+| `400` | Validation failed (e.g. `newPassword` shorter than 8 or longer than 72, missing fields) |
+| `400` | `New password must differ from the previous one` |
+| `400` | `User is created with third party provider, no password is set` — a Google-only account has no current password to check; use `forgot-password` → `reset-password` to add one |
+| `401` | Missing, malformed or expired access token, or the token was issued before the user's most recent password change |
+| `403` | `Invalid current password` (a `403`, not a `401`, on purpose: the session itself is fine, and a `401` would make clients think it expired and try to refresh) |
+| `403` | `Email not verified` |
+| `429` | Rate limit exceeded |
 
 ---
 
@@ -646,7 +675,7 @@ If `emailVerified` is `false`, send the user to the code screen.
 **Errors**
 | Status | Cause |
 |---|---|
-| `401` | Missing, malformed, or expired access token; or the token was issued before the user's most recent password reset (rejected even if not yet expired) |
+| `401` | Missing, malformed, or expired access token; or the token was issued before the user's most recent password reset or change (rejected even if not yet expired) |
 
 ---
 
