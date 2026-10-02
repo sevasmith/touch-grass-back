@@ -7,8 +7,10 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { randomBytes } from 'crypto';
 import type { Request, Response } from 'express';
-
-const STATE_COOKIE = 'google-oauth-state';
+import {
+  OAUTH_STATE_COOKIE,
+  OAUTH_STATE_COOKIE_MAX_AGE_MS,
+} from '../auth.constants';
 
 @Injectable()
 export class GoogleAuthGuard extends AuthGuard('google') {
@@ -39,11 +41,11 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     if (this.isCallback(http.getRequest<Request>())) return undefined;
 
     const state = randomBytes(16).toString('base64url');
-    http.getResponse<Response>().cookie(STATE_COOKIE, state, {
+    http.getResponse<Response>().cookie(OAUTH_STATE_COOKIE, state, {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 5 * 60 * 1000,
+      maxAge: OAUTH_STATE_COOKIE_MAX_AGE_MS,
     });
     return { state };
   }
@@ -54,9 +56,9 @@ export class GoogleAuthGuard extends AuthGuard('google') {
 
     if (this.isCallback(req)) {
       const cookies = (req.cookies ?? {}) as Record<string, string>;
-      const expected = cookies[STATE_COOKIE] ?? '';
+      const expected = cookies[OAUTH_STATE_COOKIE] ?? '';
 
-      http.getResponse<Response>().clearCookie(STATE_COOKIE);
+      http.getResponse<Response>().clearCookie(OAUTH_STATE_COOKIE);
       if (!expected || req.query.state !== expected) {
         this.logger.warn(
           `State check failed (${expected ? 'state mismatch' : 'no state cookie'}): ` +

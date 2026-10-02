@@ -28,6 +28,12 @@ import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 import { OAuthAccountDto } from './dto/oauth-account.dto';
 import { GoogleAuthGuard } from './guards/google-auth-guard';
 import { OAuthCallbackExceptionFilter } from './filters/oauth-callback-exception.filter';
+import {
+  FORGOT_PASSWORD_THROTTLE,
+  LOGIN_THROTTLE,
+  RESEND_VERIFICATION_THROTTLE,
+  VERIFY_EMAIL_THROTTLE,
+} from './auth.constants';
 
 @Controller('auth')
 export class AuthController {
@@ -42,7 +48,7 @@ export class AuthController {
     return this.authService.signup(dto);
   }
 
-  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Throttle(LOGIN_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('login')
@@ -64,7 +70,7 @@ export class AuthController {
     return this.authService.refresh(dto);
   }
 
-  @Throttle({ default: { ttl: 900_000, limit: 3 } })
+  @Throttle(FORGOT_PASSWORD_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('forgot-password')
@@ -102,7 +108,7 @@ export class AuthController {
     return res.redirect(redirectUrl);
   }
 
-  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Throttle(VERIFY_EMAIL_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @AllowUnverified()
   @Post('verify-email')
@@ -111,7 +117,7 @@ export class AuthController {
     return this.emailVerificationService.verify(id, dto.code);
   }
 
-  @Throttle({ default: { ttl: 900_000, limit: 3 } })
+  @Throttle(RESEND_VERIFICATION_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @AllowUnverified()
   @Post('resend-verification')

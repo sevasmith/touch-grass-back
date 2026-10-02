@@ -1,5 +1,6 @@
-import { IsEmail, IsString } from 'class-validator';
+import { IsEmail, IsString, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
+import { PASSWORD_MAX_LENGTH } from '../auth.constants';
 
 export class LoginDto {
   @IsEmail()
@@ -8,6 +9,7 @@ export class LoginDto {
   )
   email: string;
 
+  @MaxLength(PASSWORD_MAX_LENGTH)
   @IsString()
   password: string;
 }

@@ -39,6 +39,7 @@ export class MailService {
     try {
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'post',
+        signal: AbortSignal.timeout(2000),
         headers: {
           'api-key': this.configService.getOrThrow<string>('BREVO_API_KEY'),
           'content-type': 'application/json',

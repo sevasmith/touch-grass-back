@@ -19,6 +19,7 @@ import { EmailVerificationService } from './email-verification.service';
 import { AuthController } from './auth.controller';
 import { MailModule } from '../mail/mail.module';
 import { PassportModule } from '@nestjs/passport';
+import { JWT_ALGORITHM, JWT_AUDIENCE, JWT_ISSUER } from './auth.constants';
 
 @Module({
   imports: [
@@ -37,6 +38,9 @@ import { PassportModule } from '@nestjs/passport';
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('JWT_SECRET'),
         signOptions: {
+          algorithm: JWT_ALGORITHM,
+          audience: JWT_AUDIENCE,
+          issuer: JWT_ISSUER,
           expiresIn: config.get<string>('JWT_ACCESS_TTL') as StringValue,
         },
       }),

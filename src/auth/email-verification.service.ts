@@ -16,9 +16,11 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomInt, createHash, randomUUID, timingSafeEqual } from 'crypto';
 import ms from 'ms';
 import type { StringValue } from 'ms';
-
-const RESEND_COOLDOWN_MS = 60_000;
-const MAX_ATTEMPTS = 5;
+import {
+  EMAIL_VERIFICATION_CODE_LENGTH,
+  EMAIL_VERIFICATION_MAX_ATTEMPTS,
+  EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
+} from './auth.constants';
 
 @Injectable()
 export class EmailVerificationService {
@@ -36,7 +38,9 @@ export class EmailVerificationService {
 
   async issue(user: User): Promise<void> {
     const id = randomUUID();
-    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const code = randomInt(0, 10 ** EMAIL_VERIFICATION_CODE_LENGTH)
+      .toString()
+      .padStart(EMAIL_VERIFICATION_CODE_LENGTH, '0');
     const codeHash = createHash('sha256').update(code).digest('hex');
     const codeTtl = this.configService.getOrThrow<string>(
       'EMAIL_VERIFICATION_TTL',
@@ -77,7 +81,8 @@ export class EmailVerificationService {
     });
     if (
       latest &&
-      Date.now() - latest.createdAt.getTime() < RESEND_COOLDOWN_MS
+      Date.now() - latest.createdAt.getTime() <
+        EMAIL_VERIFICATION_RESEND_COOLDOWN_MS
     ) {
       throw new HttpException(
         'Please wait a moment before requesting another code',
@@ -118,7 +123,7 @@ export class EmailVerificationService {
           id: record.id,
           usedAt: IsNull(),
           invalidatedAt: IsNull(),
-          attempts: LessThan(MAX_ATTEMPTS),
+          attempts: LessThan(EMAIL_VERIFICATION_MAX_ATTEMPTS),
         },
         { attempts: () => 'attempts + 1' },
       );
