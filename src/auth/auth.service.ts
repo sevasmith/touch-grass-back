@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -25,14 +27,28 @@ import { ResetToken } from './entities/reset-token.entity';
 import { OAuthAccount } from './entities/oauth-account.entity';
 import { OAuthLoginToken } from './entities/oauth-login-token.entity';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository, IsNull, QueryFailedError } from 'typeorm';
+import { setTimeout as sleep } from 'timers/promises';
+import {
+  DataSource,
+  Repository,
+  IsNull,
+  QueryFailedError,
+  EntityManager,
+  MoreThan,
+} from 'typeorm';
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'crypto';
 import ms from 'ms';
 import type { StringValue } from 'ms';
+import {
+  FORGOT_PASSWORD_MIN_MS,
+  PASSWORD_RESET_COOLDOWN_MS,
+} from './auth.constants';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  private readonly dummyHash = hash('bazoooooka-kaboom-kablau');
 
   constructor(
     private readonly usersService: UsersService,
@@ -54,6 +70,7 @@ export class AuthService {
 
   private async issueTokens(
     user: User,
+    manager?: EntityManager,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const accessToken = await this.jwtService.signAsync({
       sub: user.id,
@@ -70,7 +87,11 @@ export class AuthService {
     ) as StringValue;
     const expiresAt = new Date(Date.now() + ms(refreshTtl));
 
-    await this.refreshTokenRepository.insert({
+    const repository = manager
+      ? manager.withRepository(this.refreshTokenRepository)
+      : this.refreshTokenRepository;
+
+    await repository.insert({
       id,
       userId: user.id,
       tokenHash,
@@ -99,11 +120,11 @@ export class AuthService {
     dto: LoginDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const user = await this.usersService.findByEmailWithPassword(dto.email);
-    if (
-      !user ||
-      !user.passwordHash ||
-      !(await verify(user.passwordHash, dto.password))
-    ) {
+
+    const passwordHash = user?.passwordHash ?? (await this.dummyHash);
+    const passwordValid = await verify(passwordHash, dto.password);
+
+    if (!user || !user.passwordHash || !passwordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
     await this.usersService.updateLastLoginAt(user.id);
@@ -111,9 +132,28 @@ export class AuthService {
   }
 
   async logout(dto: LogoutDto): Promise<void> {
-    const [id] = dto.refreshToken.split('.');
-    if (!isUUID(id)) return;
-    await this.refreshTokenRepository.update(id, { revokedAt: new Date() });
+    const [id, secret] = dto.refreshToken.split('.');
+    if (!id || !secret || !isUUID(id)) return;
+    const tokenRecord = await this.refreshTokenRepository.findOne({
+      where: { id },
+    });
+    if (!tokenRecord) return;
+    const providedHash = createHash('sha256').update(dto.refreshToken).digest();
+    const savedHash = Buffer.from(tokenRecord.tokenHash, 'hex');
+    if (!timingSafeEqual(providedHash, savedHash)) return;
+    await this.refreshTokenRepository.update(
+      { id, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+  }
+
+  async logoutAll(userId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await this.usersService.invalidateTokens(userId, manager);
+      await manager
+        .withRepository(this.refreshTokenRepository)
+        .update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+    });
   }
 
   async refresh(
@@ -150,20 +190,27 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token expired');
     }
 
-    const user = await this.usersService.findById(refreshTokenRecord.userId);
-    if (!user) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
+    return this.dataSource.transaction(async (manager) => {
+      const user = await manager.getRepository(User).findOne({
+        where: { id: refreshTokenRecord.userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
 
-    const { affected } = await this.refreshTokenRepository.update(
-      { id: refreshTokenRecord.id, revokedAt: IsNull() },
-      { revokedAt: new Date() },
-    );
-    if (!affected) {
-      throw new UnauthorizedException('Refresh token already used');
-    }
+      const { affected } = await manager
+        .withRepository(this.refreshTokenRepository)
+        .update(
+          { id: refreshTokenRecord.id, revokedAt: IsNull() },
+          { revokedAt: new Date() },
+        );
+      if (!affected) {
+        throw new UnauthorizedException('Refresh token already used');
+      }
 
-    return this.issueTokens(user);
+      return this.issueTokens(user, manager);
+    });
   }
 
   async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
@@ -171,45 +218,57 @@ export class AuthService {
       message: 'If that email is registered, a reset link has been sent.',
     };
 
+    const minDuration = sleep(FORGOT_PASSWORD_MIN_MS);
+
     const user = await this.usersService.findByEmail(dto.email);
-    if (!user) {
-      return genericResponse;
-    }
 
-    const id = randomUUID();
-    const secret = randomBytes(32).toString('base64url');
-    const resetToken = `${id}.${secret}`;
-    const resetTokenHash = createHash('sha256')
-      .update(resetToken)
-      .digest('hex');
-
-    const resetTtl = this.configService.get<string>(
-      'PASSWORD_RESET_TTL',
-    ) as StringValue;
-    const resetTokenExpiresAt = new Date(Date.now() + ms(resetTtl));
-
-    await this.dataSource.transaction(async (manager) => {
-      const resetTokens = manager.withRepository(this.resetTokenRepository);
-      await resetTokens.update(
-        { userId: user.id, usedAt: IsNull(), invalidatedAt: IsNull() },
-        { invalidatedAt: new Date() },
-      );
-      await resetTokens.insert({
-        id,
-        userId: user.id,
-        tokenHash: resetTokenHash,
-        expiresAt: resetTokenExpiresAt,
+    if (user) {
+      const recentTokenRecord = await this.resetTokenRepository.findOne({
+        where: {
+          userId: user.id,
+          createdAt: MoreThan(
+            new Date(Date.now() - PASSWORD_RESET_COOLDOWN_MS),
+          ),
+        },
       });
-    });
+      if (!recentTokenRecord) {
+        const id = randomUUID();
+        const secret = randomBytes(32).toString('base64url');
+        const resetToken = `${id}.${secret}`;
+        const resetTokenHash = createHash('sha256')
+          .update(resetToken)
+          .digest('hex');
 
-    const resetLink = `${this.configService.get<string>('FRONTEND_URL')}/reset-password?token=${resetToken}`;
+        const resetTtl = this.configService.get<string>(
+          'PASSWORD_RESET_TTL',
+        ) as StringValue;
+        const resetTokenExpiresAt = new Date(Date.now() + ms(resetTtl));
 
-    try {
-      await this.mailService.sendPasswordResetEmail(user.email, resetLink);
-    } catch (err) {
-      this.logger.error('Failed to send password reset email', err);
+        await this.dataSource.transaction(async (manager) => {
+          const resetTokens = manager.withRepository(this.resetTokenRepository);
+          await resetTokens.update(
+            { userId: user.id, usedAt: IsNull(), invalidatedAt: IsNull() },
+            { invalidatedAt: new Date() },
+          );
+          await resetTokens.insert({
+            id,
+            userId: user.id,
+            tokenHash: resetTokenHash,
+            expiresAt: resetTokenExpiresAt,
+          });
+        });
+
+        const resetLink = `${this.configService.get<string>('FRONTEND_URL')}/reset-password?token=${resetToken}`;
+
+        try {
+          await this.mailService.sendPasswordResetEmail(user.email, resetLink);
+        } catch (err) {
+          this.logger.error('Failed to send password reset email', err);
+        }
+      }
     }
 
+    await minDuration;
     return genericResponse;
   }
 
@@ -226,16 +285,6 @@ export class AuthService {
 
     if (!tokenRecord) {
       throw new UnauthorizedException('Invalid reset token');
-    }
-
-    const user = await this.usersService.findByIdWithPassword(
-      tokenRecord.userId,
-    );
-
-    if (user?.passwordHash && (await verify(user.passwordHash, dto.password))) {
-      throw new UnauthorizedException(
-        'New password must be different from your current password',
-      );
     }
 
     const providedHash = createHash('sha256').update(dto.token).digest();
@@ -285,6 +334,50 @@ export class AuthService {
           { revokedAt: new Date() },
         );
     });
+  }
+
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const user = await this.usersService.findByIdWithPassword(userId);
+
+    if (!user) throw new UnauthorizedException('Unauthorized access');
+
+    if (!user.passwordHash) {
+      throw new BadRequestException(
+        'User is created with third party provider, no password is set',
+      );
+    }
+
+    const passwordValid = await verify(user.passwordHash, dto.password);
+
+    if (!passwordValid) {
+      throw new ForbiddenException('Invalid current password');
+    }
+
+    if (dto.password === dto.newPassword) {
+      throw new BadRequestException(
+        'New password must differ from the previous one',
+      );
+    }
+
+    const newPasswordHash = await hash(dto.newPassword);
+
+    await this.dataSource.transaction(async (manager) => {
+      await this.usersService.resetPassword(userId, newPasswordHash, manager);
+      await manager
+        .withRepository(this.refreshTokenRepository)
+        .update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+      await manager
+        .withRepository(this.resetTokenRepository)
+        .update(
+          { userId, usedAt: IsNull(), invalidatedAt: IsNull() },
+          { invalidatedAt: new Date() },
+        );
+    });
+
+    return this.issueTokens(user);
   }
 
   async findOrCreateOAuthUser(dto: OAuthAccountDto): Promise<User> {

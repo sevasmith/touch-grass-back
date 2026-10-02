@@ -38,6 +38,15 @@ export class UsersService {
     await this.userRepository.update(id, { lastLoginAt: new Date() });
   }
 
+  async invalidateTokens(
+    userId: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await manager
+      .withRepository(this.userRepository)
+      .update(userId, { tokensValidAfter: new Date() });
+  }
+
   async create(email: string, passwordHash: string): Promise<User> {
     const user = this.userRepository.create({ email, passwordHash });
     try {

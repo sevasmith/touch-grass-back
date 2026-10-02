@@ -28,6 +28,14 @@ import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
 import { OAuthAccountDto } from './dto/oauth-account.dto';
 import { GoogleAuthGuard } from './guards/google-auth-guard';
 import { OAuthCallbackExceptionFilter } from './filters/oauth-callback-exception.filter';
+import {
+  FORGOT_PASSWORD_THROTTLE,
+  LOGIN_THROTTLE,
+  RESEND_VERIFICATION_THROTTLE,
+  VERIFY_EMAIL_THROTTLE,
+  CHANGE_PASSWORD_THROTTLE,
+} from './auth.constants';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -42,7 +50,7 @@ export class AuthController {
     return this.authService.signup(dto);
   }
 
-  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Throttle(LOGIN_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('login')
@@ -57,6 +65,13 @@ export class AuthController {
     return this.authService.logout(dto);
   }
 
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Post('logout-all')
+  logoutAll(@Req() req: Request) {
+    const { id } = req.user as { id: string };
+    return this.authService.logoutAll(id);
+  }
+
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('refresh')
@@ -64,7 +79,7 @@ export class AuthController {
     return this.authService.refresh(dto);
   }
 
-  @Throttle({ default: { ttl: 900_000, limit: 3 } })
+  @Throttle(FORGOT_PASSWORD_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('forgot-password')
@@ -77,6 +92,14 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @Throttle(CHANGE_PASSWORD_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @Post('change-password')
+  changePassword(@Body() dto: ChangePasswordDto, @Req() req: Request) {
+    const { id } = req.user as { id: string };
+    return this.authService.changePassword(id, dto);
   }
 
   @HttpCode(HttpStatus.OK)
@@ -102,7 +125,7 @@ export class AuthController {
     return res.redirect(redirectUrl);
   }
 
-  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Throttle(VERIFY_EMAIL_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @AllowUnverified()
   @Post('verify-email')
@@ -111,7 +134,7 @@ export class AuthController {
     return this.emailVerificationService.verify(id, dto.code);
   }
 
-  @Throttle({ default: { ttl: 900_000, limit: 3 } })
+  @Throttle(RESEND_VERIFICATION_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @AllowUnverified()
   @Post('resend-verification')

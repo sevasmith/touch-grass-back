@@ -27,6 +27,9 @@ export class User {
   @Column({ type: 'timestamptz', nullable: true })
   passwordChangedAt: Date | null;
 
+  @Column({ type: 'timestamptz', nullable: true })
+  tokensValidAfter: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
