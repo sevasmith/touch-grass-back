@@ -147,6 +147,15 @@ export class AuthService {
     );
   }
 
+  async logoutAll(userId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await this.usersService.invalidateTokens(userId, manager);
+      await manager
+        .withRepository(this.refreshTokenRepository)
+        .update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+    });
+  }
+
   async refresh(
     dto: RefreshDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {

@@ -65,6 +65,13 @@ export class AuthController {
     return this.authService.logout(dto);
   }
 
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Post('logout-all')
+  logoutAll(@Req() req: Request) {
+    const { id } = req.user as { id: string };
+    return this.authService.logoutAll(id);
+  }
+
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('refresh')

@@ -31,8 +31,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     const user = await this.userService.findById(payload.sub);
     if (!user) throw new UnauthorizedException();
     if (
-      user.passwordChangedAt &&
-      payload.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)
+      (user.passwordChangedAt &&
+        payload.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) ||
+      (user.tokensValidAfter &&
+        payload.iat < Math.floor(user.tokensValidAfter.getTime() / 1000))
     ) {
       throw new UnauthorizedException();
     }
