@@ -20,6 +20,8 @@ export const FORGOT_PASSWORD_THROTTLE = {
   default: { ttl: 900_000, limit: 3 },
 };
 export const VERIFY_EMAIL_THROTTLE = { default: { ttl: 60_000, limit: 5 } };
+export const EMAIL_VERIFICATION_DAILY_CODE_LIMIT = 10;
+export const EMAIL_VERIFICATION_DAILY_LIMIT_MS = 24 * 60 * 60 * 1000;
 export const RESEND_VERIFICATION_THROTTLE = {
   default: { ttl: 900_000, limit: 3 },
 };
