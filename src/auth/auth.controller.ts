@@ -31,6 +31,7 @@ import { OAuthCallbackExceptionFilter } from './filters/oauth-callback-exception
 import {
   FORGOT_PASSWORD_THROTTLE,
   LOGIN_THROTTLE,
+  SIGNUP_THROTTLE,
   RESEND_VERIFICATION_THROTTLE,
   VERIFY_EMAIL_THROTTLE,
   CHANGE_PASSWORD_THROTTLE,
@@ -44,6 +45,7 @@ export class AuthController {
     private readonly emailVerificationService: EmailVerificationService,
   ) {}
 
+  @Throttle(SIGNUP_THROTTLE)
   @Public()
   @Post('signup')
   signup(@Body() dto: SignupDto) {

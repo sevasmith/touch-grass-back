@@ -58,7 +58,7 @@ There are two ways to sign in — email + password, and Google — and **both en
 
 - **Access tokens** are short-lived JWTs. Send them as `Authorization: Bearer <accessToken>` on any endpoint that requires auth. Don't try to decode/inspect them beyond that — treat as opaque from the frontend's perspective.
 - **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one stops working immediately after use.
-- If a refresh token is reused after being invalidated (revoked or already-rotated), the backend treats that as a possible compromise and revokes **all** of that user's active refresh tokens — every session gets logged out, not just the one making the suspicious request.
+- If a refresh token is reused after being invalidated (revoked or already-rotated), the backend treats that as a possible compromise and ends **all** of that user's sessions exactly like `logout-all` does: every refresh token is revoked *and* every access token issued so far is rejected immediately (via `User.tokensValidAfter`), not only once it expires — every session gets logged out, not just the one making the suspicious request.
 - Resetting a password revokes all of the user's refresh tokens *and* invalidates any access token issued before the reset (even if that access token hasn't technically expired yet) — so a password reset is effectively an instant global logout.
 - **Changing a password** while logged in (`POST /auth/change-password`) does the same to every *other* session, but the device that made the change gets a fresh `{ accessToken, refreshToken }` pair in the response and stays logged in. The frontend must replace its stored tokens with the ones in that response. Access tokens are compared against the change at one-second granularity, so a token issued in the same second as the change is accepted.
 - **Logging out everywhere** (`POST /auth/logout-all`) revokes all of the user's refresh tokens and invalidates every access token issued before the call, on every device including the one that made it. Access tokens are invalidated through `User.tokensValidAfter`, a timestamp the backend compares against each token's `iat` (the same way it uses `passwordChangedAt` for password changes). A token is rejected if it was issued before **either** timestamp. After `logout-all` the user simply logs in again; tokens from the new login are accepted.
@@ -68,7 +68,7 @@ There are two ways to sign in — email + password, and Google — and **both en
   ```
   For validation errors (400s), `message` is an array of strings, one per failed field.
 - **Three access tiers.** Every route is one of: `@Public()` (no token needed), `@AllowUnverified()` (valid access token, but the email may still be unverified), or the default (valid access token **and** a verified email — otherwise `403 Email not verified`). See [Email verification](#email-verification-otp) for why there are three and where each route sits.
-- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `login` is capped at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address.
+- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `signup` is capped at 10/hour, `login` at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address. On top of them, two limits are **per account** and don't depend on the IP: at most 10 verification codes per user per 24 hours ([`resend-verification`](#6-resending-a-code)) and at most 10 password-reset emails per user per 24 hours ([`forgot-password`](#post-authforgot-password)).
 - **Token ids are validated before any database lookup.** Every opaque token (`refresh`, reset, OAuth handoff) is `id.secret` where `id` is a UUID. A token whose `id` isn't a UUID is rejected as an invalid token (`401`, or `204` for `logout`) instead of reaching Postgres.
 - **Accounts can have no password.** A user created through Google has `passwordHash = NULL` until they set one via *forgot password → reset password* (there is no authenticated "set a first password" endpoint yet, see `docs/known-gaps.md`). Password login for such an account returns the same generic `401 Invalid credentials`, and `POST /auth/change-password` returns `400`, since there is no current password to check.
 
@@ -370,11 +370,13 @@ Opaque `id.secret` tokens (refresh, reset, OAuth handoff) carry 32 random bytes,
 
 **Deliberate difference from the token flows:** exhausting the attempts only kills that one code. It does **not** revoke the user's sessions the way a replayed refresh or reset token does. A wrong guess is not evidence that a secret leaked, and logging the real owner out because someone typed digits would just be a denial-of-service on them. Don't "harmonise" this.
 
-Rough numbers: 5 guesses against 1,000,000 values is 5 in a million per code, and the resend cooldown (below) limits how many fresh codes can be requested per hour.
+Rough numbers: 5 guesses against 1,000,000 values is 5 in a million per code. With the 10-codes-per-24-hours cap on `resend` (below), one account gets at most 50 guesses a day, about 0.005%, however many IP addresses the attacker has.
 
 ### 6. Resending a code
 
-`resend`: user gone → `401`; already verified → `204` no-op; newest code created less than **60 seconds** ago → `429 Please wait a moment before requesting another code` (a database-based, per-user cooldown, on top of the per-IP throttle of 3 per 15 minutes); otherwise `issue()` a fresh code.
+`resend`: user gone → `401`; already verified → `204` no-op; **10 or more codes created in the last 24 hours** → `429 Too many verification codes requested, try again later`; newest code created less than **60 seconds** ago → `429 Please wait a moment before requesting another code` (a database-based, per-user cooldown, on top of the per-IP throttle of 3 per 15 minutes); otherwise `issue()` a fresh code. The 24-hour check runs first, so it wins when both apply.
+
+**Why the 24-hour cap exists:** the 5-attempt limit is per code, and the 60-second cooldown alone would still allow a fresh code (and 5 more guesses) every minute, forever, from rotating IPs. That would be 300 guesses an hour against a 6-digit space, enough to eventually verify an account that someone registered with an email they don't own (and later get Google linked onto it, see [section 4](#4-who-is-this-user--account-resolution)). The cap is per *user*, not per IP, so changing IP doesn't reset it. It counts every code created in a rolling 24 hours (signup's first code, resends, used, expired and invalidated ones alike), limited by `EMAIL_VERIFICATION_DAILY_CODE_LIMIT` and `EMAIL_VERIFICATION_DAILY_LIMIT_MS` in `src/auth/auth.constants.ts`. It also caps how many emails can be sent to that address per day. It is checked in `resend`, not in `issue`, because `signup` swallows email errors and only creates one code per account.
 
 **Email failures are handled differently in the two places that send a code**, on purpose:
 - **On signup** the failure is logged and swallowed. The account already exists; failing the request would leave a registered user with no tokens and a confusing error. They can simply hit *resend*.
@@ -396,6 +398,7 @@ Rough numbers: 5 guesses against 1,000,000 values is 5 in a million per code, an
 | `resend-verification` → `429` right after signup | The 60-second cooldown is counted from the code created at signup. |
 | Every protected route answers `403 Email not verified` | Expected for an unverified user. Verify, or (locally) set `emailVerified = true` on the row. |
 | `401 Too many attempts…` | 5 wrong guesses used up that code. Call `resend-verification` for a new one. |
+| `resend-verification` → `429 Too many verification codes requested…` | The account already has 10 codes created in the last 24 hours. It frees up as the oldest codes age past 24 hours; there is no manual reset short of deleting rows from `email_verification_codes`. |
 | App won't boot with a Joi error mentioning `EMAIL_VERIFICATION_TTL` | The variable is missing from `.env` (or from CI/the deployed environment). |
 
 ### 9. Data touched
@@ -408,7 +411,7 @@ Rough numbers: 5 guesses against 1,000,000 values is 5 in a million per code, an
 ## Endpoints
 
 ### `POST /auth/signup`
-Public. Creates a user, emails a verification code, and logs them in immediately. **The new user is unverified**: their tokens only reach [`verify-email`, `resend-verification` and `me`](#email-verification-otp) until they verify.
+Public. Rate limited: 10/hour per IP (every request counts, including ones that fail validation or answer `409`). Creates a user, emails a verification code, and logs them in immediately. **The new user is unverified**: their tokens only reach [`verify-email`, `resend-verification` and `me`](#email-verification-otp) until they verify.
 
 **Body**
 ```json
@@ -426,6 +429,9 @@ A failure to send the email does not change this response; the user can call `re
 |---|---|
 | `400` | Validation failed (invalid email, password outside 8–72 chars, missing fields) |
 | `409` | Email already registered |
+| `429` | Rate limit exceeded (10 per hour per IP) |
+
+The limit exists because every successful signup sends an email to whatever address was submitted. Since an already-registered address answers `409` and sends nothing, one address can only ever get one signup email; the limit is about how many *different* addresses a single IP can mail.
 
 ---
 
@@ -513,7 +519,7 @@ Public. Rotates the refresh token — the one you send is invalidated, a new pai
 |---|---|
 | `400` | Validation failed |
 | `401` | `Invalid refresh token` — malformed (including an `id` that isn't a UUID), unrecognized, or doesn't match the stored hash |
-| `401` | `Refresh token revoked` — reuse of an already-revoked token (this also revokes all of the user's other active refresh tokens) |
+| `401` | `Refresh token revoked` — reuse of an already-revoked token (this also ends every session as `logout-all` does: all refresh tokens are revoked and all earlier access tokens stop working) |
 | `401` | `Refresh token expired` |
 | `401` | `Refresh token already used` — the same token was raced/replayed |
 
@@ -544,6 +550,7 @@ There is no `401`/`404` for an unknown email — that's intentional, not a bug.
 
 - **Every response takes at least about 3 seconds**, whether or not the email is registered, so response time can't be used to find out which emails have accounts. The frontend should show a loading state and not treat the delay as a problem.
 - **A 60-second cooldown per account:** if a reset link was already created for that user in the last minute, no new link is created and no email is sent, but the response is still the same `200`. The frontend should tell the user to wait a minute before asking again (and to check spam). Once the cooldown has passed, requesting a new link invalidates any previously-issued, unused link for that user.
+- **A cap of 10 reset emails per account per rolling 24 hours:** it counts every reset link created for that user in the last 24 hours (used, expired and replaced ones included), and once it is reached no new link is created and no email is sent. Like the cooldown it is **silent**: the response is still the same `200`, because an error here would reveal that the email has an account. It exists because the per-IP limit (3 per 15 minutes) and the 60-second cooldown alone would still let someone with a handful of IP addresses send one reset email a minute, about 1,440 a day, to a single inbox. The trade-off of any per-account cap on an unauthenticated endpoint is that someone can use up another person's allowance and block that person's own password reset until old links age out of the 24-hour window; that is why the cap is generous. The frontend can't tell this case apart from the others, so the usual "check your email, or try again later" message is the right one. Values: `FORGOT_PASSWORD_DAILY_TOKENS_LIMIT` and `FORGOT_PASSWORD_DAILY_LIMIT_MS` in `src/auth/auth.constants.ts`.
 
 ---
 
@@ -563,7 +570,7 @@ Public. Uses the token from the link sent by `forgot-password`.
 | `400` | Validation failed |
 | `401` | `Invalid reset token` — malformed (including an `id` that isn't a UUID), unrecognized, or doesn't match the stored hash |
 | `401` | `Reset token expired` |
-| `401` | `Reset token already used` — the token was already successfully consumed (this also revokes all of the user's active sessions, since it may indicate the link leaked) |
+| `401` | `Reset token already used` — the token was already successfully consumed (this also ends every session as `logout-all` does, revoking all refresh tokens and invalidating earlier access tokens, since it may indicate the link leaked) |
 | `401` | `This reset link has been replaced by a newer request` — the user requested another reset link after this one was sent; this one is now stale. No session revocation in this case, since nothing was actually compromised. |
 
 Frontend note: `already used` and `replaced by a newer request` are deliberately different messages — show the user something accurate rather than a generic "invalid link" for both, since the second case just means "check your most recent email."
@@ -634,7 +641,7 @@ The password is changed and **every other session is logged out**: all of the us
 | Status | Cause |
 |---|---|
 | `401` | Missing/invalid/expired access token, or the user no longer exists |
-| `429` | Rate limit exceeded, **or** `Please wait a moment before requesting another code` (the previous code was issued less than 60 s ago) |
+| `429` | Rate limit exceeded, **or** `Too many verification codes requested, try again later` (10 codes already created for this user in the last 24 hours, counting the one from signup), **or** `Please wait a moment before requesting another code` (the previous code was issued less than 60 s ago) |
 | `503` | `Unable to send the verification email, try again later` — the email provider failed. A new code row was still created, so the 60 s cooldown applies to the retry. |
 
 ---

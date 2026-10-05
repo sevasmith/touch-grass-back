@@ -42,6 +42,8 @@ import type { StringValue } from 'ms';
 import {
   FORGOT_PASSWORD_MIN_MS,
   PASSWORD_RESET_COOLDOWN_MS,
+  FORGOT_PASSWORD_DAILY_LIMIT_MS,
+  FORGOT_PASSWORD_DAILY_TOKENS_LIMIT,
 } from './auth.constants';
 import { ChangePasswordDto } from './dto/change-password.dto';
 
@@ -179,10 +181,7 @@ export class AuthService {
     }
 
     if (refreshTokenRecord.revokedAt) {
-      await this.refreshTokenRepository.update(
-        { userId: refreshTokenRecord.userId, revokedAt: IsNull() },
-        { revokedAt: new Date() },
-      );
+      await this.logoutAll(refreshTokenRecord.userId);
       throw new UnauthorizedException('Refresh token revoked');
     }
 
@@ -231,7 +230,18 @@ export class AuthService {
           ),
         },
       });
-      if (!recentTokenRecord) {
+      const resetTokensCount = await this.resetTokenRepository.count({
+        where: {
+          userId: user.id,
+          createdAt: MoreThan(
+            new Date(Date.now() - FORGOT_PASSWORD_DAILY_LIMIT_MS),
+          ),
+        },
+      });
+      if (
+        !recentTokenRecord &&
+        resetTokensCount < FORGOT_PASSWORD_DAILY_TOKENS_LIMIT
+      ) {
         const id = randomUUID();
         const secret = randomBytes(32).toString('base64url');
         const resetToken = `${id}.${secret}`;
@@ -308,10 +318,7 @@ export class AuthService {
         where: { id: tokenRecord.id },
       });
       if (current?.usedAt) {
-        await this.refreshTokenRepository.update(
-          { userId: tokenRecord.userId, revokedAt: IsNull() },
-          { revokedAt: new Date() },
-        );
+        await this.logoutAll(current.userId);
         throw new UnauthorizedException('Reset token already used');
       }
       throw new UnauthorizedException(
