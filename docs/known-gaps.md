@@ -48,6 +48,42 @@
   Note that with multiple tasks you will almost certainly also have a load balancer, so in practice both fixes land together.
 - **The per-route limits in `auth.controller.ts` (5/min for login, 3 per 15 min for forgot-password, etc.) were chosen assuming per-IP counters** and should be re-checked once the fixes above are in, since people behind the same NAT (offices, mobile carriers) share an IP.
 
-## CI
+## Infrastructure, CI/CD and Docker
+
+Everything about the pipeline, the container image and the AWS side that is unfinished, unverified or needs a decision. Items under "Before the next deploy" are one-time setup that the repo can't do for itself; the rest are gaps to revisit.
+
+### Before the next deploy to `main` (needs a person with AWS/GitHub access)
+
+The deploy now runs database migrations as a one-off ECS task before the service is updated (`cd.yml`, step "Run database migrations"). None of the AWS side has been exercised yet, so:
+
+- [ ] **GitHub variables.** Add `ECS_SUBNETS` (comma-separated subnet ids) and `ECS_SECURITY_GROUPS` (comma-separated). Copy them from the ECS service's networking tab so the migration task runs in the same network as the app (it must reach the database).
+- [ ] **IAM.** The role in the `AWS_ROLE_ARN` secret needs `ecs:RunTask`, `ecs:DescribeTasks` and `iam:PassRole` (for the task's execution role and task role), on top of what it already has.
+- [ ] **Launch type.** The step hardcodes `--launch-type FARGATE`. Change it if the service runs on EC2.
+- [ ] **ECS task definition env vars.** The deploy downloads the *live* task definition from AWS, so env vars come from AWS, not this repo. Check that all 19 keys required by `src/config/env.validation.ts` are present (especially `EMAIL_VERIFICATION_TTL`, `OAUTH_LOGIN_TOKEN_TTL` and the three `GOOGLE_*`). A missing key makes the container fail env validation at boot, and the migration task would fail the same way.
+- [ ] **Open a PR to `main` and wait for CI to go green** before merging (CI runs only on pull requests; CD runs only on pushes to `main`).
+- [ ] **Watch the first deploy.** The migration step has never run against real AWS. If it fails, the deploy stops before the service is touched; the migration task's own output is in the container's CloudWatch log group, not in the Actions log.
+
+### Questions only the infra owner can answer (not verifiable from the repo)
+
+- How are secrets (`JWT_SECRET`, `BREVO_API_KEY`, `GOOGLE_OAUTH_CLIENT_SECRET`, DB password) injected into the task: plain environment values in the task definition, or ECS `secrets` from Secrets Manager / SSM? Plain values are readable by anyone who can describe the task definition.
+- Does the ECS service have the deployment circuit breaker with rollback enabled? The "Deployment failure" summary in `cd.yml` claims it does; nothing in the repo confirms it.
+- Is the load balancer target group's health check path `/health`? (The Dockerfile `HEALTHCHECK` and the CI smoke test use it; the target group is configured outside the repo.)
+- Which Postgres version and PostGIS does production run? CI and local dev use `postgis/postgis:16-3.4`; a mismatch can hide migration problems.
+- Are there branch protection rules on `main` (required CI checks, required PR title check, no direct pushes) and required reviewers on the `production` GitHub environment? CD builds and deploys on any push to `main`.
+- Is there a staging environment? Today a merge to `main` goes straight to production.
+
+### Known gaps
 
 - The `docker-build` job's container smoke test (`.github/workflows/ci.yml`) still soft-fails on purpose — it doesn't provision a Postgres service or pass any env vars to `docker run`, so the container can't actually boot inside that job yet. To make the health-check curl a real (hard-failing) check, that job needs the same `postgres:` service + full env var set that `e2e-tests` already has.
+- `docker-compose.yml` has the same limitation: it passes no env vars and has no database, so the app fails env validation at boot and the container never becomes healthy (its healthcheck now correctly hits `/health`). Add `env_file: .env` and a database (see `docker-compose.dev.yml`), or treat the file as build-only.
+- **Migrations run against the live database while the old code is still serving.** Only additive migrations (new nullable columns or tables, new indexes) are safe; a rename or drop breaks the running version until the new one is up. There are also no automated rollbacks: if the migration succeeds but the service deploy then fails, the schema stays ahead of the code (ECS rolls the code back, not the database). Write `down()` methods and keep migrations backwards compatible.
+- **The migration step is hard to debug and slightly misleading when it fails.** The Actions log shows only the exit code (the output is in CloudWatch). `run-task` failures (no capacity, bad subnet) surface as a cryptic `None` ARN error. The "Deployment failure" summary at the end always says "ECS service did not stabilize", even when the migration step was what failed.
+- **Every deploy registers two identical task definition revisions** (once in the migration step, once in the deploy action). Harmless, but the revision list grows twice as fast. If it ever becomes noise, register once and pass the same ARN to both steps.
+- **A vulnerable image is already in ECR when the scan runs.** `build-and-push` pushes `:sha-…` *and* `:latest` before `image-scan`. The scan now fails the pipeline (so it isn't deployed), but the bad image stays in the registry and `:latest` points at it. Consider scanning before pushing `:latest`, or tagging `:latest` only after the scan passes. There is also no `.trivyignore`, so an unfixable false positive would block deploys until the base image changes.
+- **SHA-pinned actions will go stale.** All actions are pinned to commit SHAs (good), but there is no Dependabot/Renovate config to propose updates, so security fixes in the actions themselves will not arrive on their own. `configure-aws-credentials` is on `v4.3.1`; `v6.x` exists.
+- **The Docker build isn't fully reproducible.** The base image is a floating tag (`node:24-alpine`, not a digest), and the Dockerfile runs `apk upgrade` and `npm install -g npm@latest` (a Trivy CVE workaround), so two builds of the same commit can differ.
+- **CI and CD e2e jobs use the real repo secrets** (`JWT_SECRET`, `BREVO_API_KEY`, `GOOGLE_OAUTH_CLIENT_SECRET`) and vars. Throwaway values would be safer (the e2e suite never needs to send real email or talk to Google), and pull requests from forks get no secrets, so their e2e job fails at env validation.
+- **E2E jobs don't run migrations.** `test/health.e2e-spec.ts` only needs a connection, so it passes. The first e2e test that touches a table will fail until the job runs `pnpm run migration:run` (against the CI Postgres) before `pnpm test:e2e`.
+- **`pnpm audit --audit-level=high` blocks every PR** when a new advisory appears in any dependency, whether or not the PR touched dependencies. Expected, but be ready to add an `overrides` entry (as `pnpm-workspace.yaml` already has) or pin around it.
+- **The pnpm version lives only in `package.json`'s `packageManager`.** `pnpm/action-setup` must not get a `version:` input again (it errors when pnpm is specified twice), and anyone with a different local pnpm gets it switched automatically for this repo. Bumping pnpm means changing that one field and checking `pnpm install --frozen-lockfile` still passes.
+- Related gaps listed elsewhere in this file: rate limiting behind a proxy / with several tasks (**Deployment / rate limiting**), and the missing cleanup job for expired auth rows (**Auth / OAuth**).

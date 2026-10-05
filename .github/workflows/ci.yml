@@ -14,7 +14,6 @@ permissions:
 
 env:
   NODE_VERSION: '24'
-  PNPM_VERSION: '10'
 
 jobs:
 
@@ -28,8 +27,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -56,8 +53,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -106,8 +101,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -169,7 +162,7 @@ jobs:
           docker run -d --name ci-test -p 3001:3001 touch-grass-back:ci-test
           sleep 5
           docker logs ci-test
-          curl -sf http://localhost:3001/health || echo "Health check failed - expected until this job provisions DB/env vars for the container (see docs/forgot-reset-password-todo.md)"
+          curl -sf http://localhost:3001/health || echo "Health check failed - expected until this job provisions DB/env vars for the container (see the Infrastructure, CI/CD and Docker section of docs/known-gaps.md)"
           docker stop ci-test
           docker rm ci-test
 
@@ -184,8 +177,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

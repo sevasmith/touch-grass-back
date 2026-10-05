@@ -52,6 +52,8 @@ pnpm run migration:run       # applies pending migrations
 
 GitHub Actions → ECR → ECS, repo `sevasmith/touch-grass-back`. `cd.yml` runs on push to `main` only. Health checks (container-level and CI smoke test) hit `GET /health`, which also verifies DB connectivity — it's not just a liveness ping.
 
+`cd.yml`'s `deploy` job runs migrations before the service is updated: a one-off ECS task from the new image runs `node node_modules/typeorm/cli.js migration:run -d dist/database/data-source.js`, and a non-zero exit stops the deploy. It needs the `ECS_SUBNETS` and `ECS_SECURITY_GROUPS` GitHub Actions variables, and the old code keeps serving while it runs, so keep migrations additive. `data-source.ts` must keep working from both `src/` (ts-node) and `dist/` (compiled), which is why it builds its globs from `__dirname` and the file's own extension. The pnpm version is pinned once, in `package.json`'s `packageManager`; don't add a `version:` input to `pnpm/action-setup` (it errors when pnpm is specified twice).
+
 ## Where things live
 
 - `docs/known-gaps.md` — running list of what's still outstanding (testing coverage, CI follow-ups, frontend dependencies, minor polish items). Check it before assuming something's unhandled, and update it as gaps get closed or new ones surface.
