@@ -34,15 +34,17 @@ pnpm run test:cov    # unit tests with coverage
 
 All of these are required — the app validates them at boot (via a Joi schema) and refuses to start if any are missing.
 
+The five `*_TTL` variables are durations in [`ms`](https://github.com/vercel/ms) format and must carry a **unit** (`15m`, `30d`, `60s`). They are also range-checked at boot, so a typo (`15x`), a bare number (`15` would mean 15 *milliseconds*), a zero or negative value, or a value outside the range listed below stops the app from starting with a message naming the variable. The same check applies to the deployed ECS task definition and to the CI variables.
+
 | Variable | Description |
 |---|---|
 | `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` | Postgres connection |
 | `JWT_SECRET` | Signing secret for access tokens. **At least 32 characters** — the app refuses to boot with a shorter one. Access tokens are signed with HS256 and carry fixed `iss`/`aud` claims (`src/auth/auth.constants.ts`), which the backend requires when verifying. |
-| `JWT_ACCESS_TTL` | Access token lifetime (e.g. `15m`) |
-| `JWT_REFRESH_TTL` | Refresh token lifetime (e.g. `30d`) |
-| `PASSWORD_RESET_TTL` | How long a password-reset link stays valid (e.g. `15m`) |
-| `OAUTH_LOGIN_TOKEN_TTL` | How long the short-lived, single-use OAuth login handoff token stays valid (e.g. `60s`). See [Sign in with Google](#sign-in-with-google-oauth). |
-| `EMAIL_VERIFICATION_TTL` | How long an emailed verification code stays valid (e.g. `10m`). See [Email verification](#email-verification-otp). |
+| `JWT_ACCESS_TTL` | Access token lifetime (e.g. `15m`). Allowed range: `1m`–`1h`. |
+| `JWT_REFRESH_TTL` | Refresh token lifetime (e.g. `30d`). Allowed range: `1h`–`90d`. |
+| `PASSWORD_RESET_TTL` | How long a password-reset link stays valid (e.g. `15m`). Allowed range: `1m`–`1h`. |
+| `OAUTH_LOGIN_TOKEN_TTL` | How long the short-lived, single-use OAuth login handoff token stays valid (e.g. `60s`). Allowed range: `10s`–`5m`. See [Sign in with Google](#sign-in-with-google-oauth). |
+| `EMAIL_VERIFICATION_TTL` | How long an emailed verification code stays valid (e.g. `10m`). Allowed range: `1m`–`1h`. See [Email verification](#email-verification-otp). |
 | `FRONTEND_URL` | Base URL of the frontend. Used to build the password-reset link (`${FRONTEND_URL}/reset-password?token=...`) **and** where the Google login redirects the browser afterwards (`${FRONTEND_URL}/oauth/complete?token=...` or `?error=...`). The scheme must match how the frontend is really served — `http://localhost:3000` locally, not `https://`, unless you run local HTTPS. |
 | `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. |
 | `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset and email-verification emails |
@@ -68,7 +70,7 @@ There are two ways to sign in — email + password, and Google — and **both en
   ```
   For validation errors (400s), `message` is an array of strings, one per failed field.
 - **Three access tiers.** Every route is one of: `@Public()` (no token needed), `@AllowUnverified()` (valid access token, but the email may still be unverified), or the default (valid access token **and** a verified email — otherwise `403 Email not verified`). See [Email verification](#email-verification-otp) for why there are three and where each route sits.
-- Rate limiting: most routes allow 20 requests/minute per IP by default (this includes the two Google routes). `signup` is capped at 10/hour, `login` at 5/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address. On top of them, two limits are **per account** and don't depend on the IP: at most 10 verification codes per user per 24 hours ([`resend-verification`](#6-resending-a-code)) and at most 10 password-reset emails per user per 24 hours ([`forgot-password`](#post-authforgot-password)).
+- Rate limiting: the app-wide default is 300 requests/minute per IP, so ordinary (non-auth) routes have headroom. The auth routes set their own, much stricter limits on top of it: `signup` is capped at 10/hour, `login` at 10/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Every other auth route (`logout`, `logout-all`, `refresh`, `reset-password`, `oauth/exchange`, `me` and the two Google routes) shares a default auth limit of 20/minute (`AUTH_DEFAULT_THROTTLE`). Counters are kept per route and per IP, so each route has its own bucket. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address. On top of them, two limits are **per account** and don't depend on the IP: at most 10 verification codes per user per 24 hours ([`resend-verification`](#6-resending-a-code)) and at most 10 password-reset emails per user per 24 hours ([`forgot-password`](#post-authforgot-password)).
 - **Token ids are validated before any database lookup.** Every opaque token (`refresh`, reset, OAuth handoff) is `id.secret` where `id` is a UUID. A token whose `id` isn't a UUID is rejected as an invalid token (`401`, or `204` for `logout`) instead of reaching Postgres.
 - **Accounts can have no password.** A user created through Google has `passwordHash = NULL` until they set one via *forgot password → reset password* (there is no authenticated "set a first password" endpoint yet, see `docs/known-gaps.md`). Password login for such an account returns the same generic `401 Invalid credentials`, and `POST /auth/change-password` returns `400`, since there is no current password to check.
 
@@ -221,7 +223,7 @@ Everything that can go wrong on `GET /auth/google/callback` happens while the **
 |---|---|
 | `access_denied` | Any `401`: the user cancelled at Google, the `state` check failed (missing cookie, mismatch, expired), Google rejected the login, or Google reports the email as unverified. |
 | `email_already_in_use` | `409`: the email belongs to an account that can't be linked (see [section 4](#4-who-is-this-user--account-resolution)). |
-| `too_many_requests` | `429`: the global rate limit (20/min/IP) was hit. |
+| `too_many_requests` | `429`: the rate limit on the callback route (20/min/IP) was hit. |
 | `oauth_failed` | Anything else (unexpected error, Google profile without an email, …). Logged server-side with a stack trace. |
 
 Only the **callback** has this filter. `GET /auth/google` (the start) returns a plain JSON `429` if you hammer it past the rate limit.
@@ -436,7 +438,7 @@ The limit exists because every successful signup sends an email to whatever addr
 ---
 
 ### `POST /auth/login`
-Public. Rate limited: 5/min per IP.
+Public. Rate limited: 10/min per IP.
 
 **Body**
 ```json
@@ -462,7 +464,7 @@ Logging in does **not** require a verified email: an unverified user gets tokens
 ---
 
 ### `POST /auth/logout`
-Public (doesn't require an access token — just the refresh token being logged out).
+Public (doesn't require an access token — just the refresh token being logged out). Rate limited: 20/min per IP.
 
 **Body**
 ```json
@@ -475,13 +477,14 @@ Public (doesn't require an access token — just the refresh token being logged 
 | Status | Cause |
 |---|---|
 | `400` | Validation failed (missing/non-string `refreshToken`) |
+| `429` | Rate limit exceeded (20/min per IP) |
 
 Note: this always returns `204` regardless of whether the refresh token actually exists, was already revoked, or is complete garbage — it's not an error to "log out" a token that's already invalid. The secret half of the token is checked too: sending only a valid token `id` with a wrong secret does nothing (and still returns `204`).
 
 ---
 
 ### `POST /auth/logout-all`
-**Requires auth and a verified email** (the default tier). Send `Authorization: Bearer <accessToken>`. Ends every session of the user, on every device, including the one that makes the call.
+**Requires auth and a verified email** (the default tier). Send `Authorization: Bearer <accessToken>`. Rate limited: 20/min per IP. Ends every session of the user, on every device, including the one that makes the call.
 
 **Body:** none.
 
@@ -496,13 +499,14 @@ The frontend should clear its stored tokens and send the user to the login scree
 |---|---|
 | `401` | Missing, malformed or expired access token, or the token was issued before the user's most recent password change or `logout-all` |
 | `403` | `Email not verified` |
+| `429` | Rate limit exceeded (20/min per IP) |
 
 Note: a token issued in the same second as the call is still accepted (the comparison is at one-second granularity). Its refresh token is revoked, so it dies when that access token expires.
 
 ---
 
 ### `POST /auth/refresh`
-Public. Rotates the refresh token — the one you send is invalidated, a new pair is issued.
+Public. Rate limited: 20/min per IP. Rotates the refresh token — the one you send is invalidated, a new pair is issued.
 
 **Body**
 ```json
@@ -522,6 +526,7 @@ Public. Rotates the refresh token — the one you send is invalidated, a new pai
 | `401` | `Refresh token revoked` — reuse of an already-revoked token (this also ends every session as `logout-all` does: all refresh tokens are revoked and all earlier access tokens stop working) |
 | `401` | `Refresh token expired` |
 | `401` | `Refresh token already used` — the same token was raced/replayed |
+| `429` | Rate limit exceeded (20/min per IP) |
 
 **Frontend requirement: never have two refreshes in flight.** The backend has no grace window. A second request that presents a refresh token that was just rotated is treated as a replay, and that revokes **all** of the user's sessions. Keep one refresh promise per client, make every caller that needs a new access token wait on it, share it across tabs with a lock (Web Locks API or `BroadcastChannel`), and always store the new refresh token before releasing it. See `docs/known-gaps.md` for the reasoning.
 
@@ -555,7 +560,7 @@ There is no `401`/`404` for an unknown email — that's intentional, not a bug.
 ---
 
 ### `POST /auth/reset-password`
-Public. Uses the token from the link sent by `forgot-password`.
+Public. Rate limited: 20/min per IP. Uses the token from the link sent by `forgot-password`.
 
 **Body**
 ```json
@@ -572,6 +577,7 @@ Public. Uses the token from the link sent by `forgot-password`.
 | `401` | `Reset token expired` |
 | `401` | `Reset token already used` — the token was already successfully consumed (this also ends every session as `logout-all` does, revoking all refresh tokens and invalidating earlier access tokens, since it may indicate the link leaked) |
 | `401` | `This reset link has been replaced by a newer request` — the user requested another reset link after this one was sent; this one is now stale. No session revocation in this case, since nothing was actually compromised. |
+| `429` | Rate limit exceeded (20/min per IP) |
 
 Frontend note: `already used` and `replaced by a newer request` are deliberately different messages — show the user something accurate rather than a generic "invalid link" for both, since the second case just means "check your most recent email."
 
@@ -647,7 +653,7 @@ The password is changed and **every other session is logged out**: all of the us
 ---
 
 ### `GET /auth/google`
-Public. Starts the Google login. **Must be reached by a browser navigation**, not `fetch` — see [Sign in with Google](#sign-in-with-google-oauth).
+Public. Rate limited: 20/min per IP. Starts the Google login. **Must be reached by a browser navigation**, not `fetch` — see [Sign in with Google](#sign-in-with-google-oauth).
 
 **Success — `302 Found`** to Google's consent screen, plus a `Set-Cookie: google-oauth-state=…` (HttpOnly, `SameSite=Lax`, 5 min). No body.
 
@@ -659,7 +665,7 @@ Public. Starts the Google login. **Must be reached by a browser navigation**, no
 ---
 
 ### `GET /auth/google/callback`
-Public. **Called by Google's redirect, never by your frontend.** Query: `code` and `state` (or `error` if the user cancelled). Requires the `google-oauth-state` cookie from the start step.
+Public. Rate limited: 20/min per IP. **Called by Google's redirect, never by your frontend.** Query: `code` and `state` (or `error` if the user cancelled). Requires the `google-oauth-state` cookie from the start step.
 
 **Always responds `302 Found`** to the frontend:
 - success → `{FRONTEND_URL}/oauth/complete?token=<handoff token>`
@@ -675,7 +681,7 @@ Public. **Called by Google's redirect, never by your frontend.** Query: `code` a
 ---
 
 ### `POST /auth/oauth/exchange`
-Public. Swaps the single-use handoff token from the callback redirect for real tokens. Call it with `fetch` from the `/oauth/complete` page.
+Public. Rate limited: 20/min per IP. Swaps the single-use handoff token from the callback redirect for real tokens. Call it with `fetch` from the `/oauth/complete` page.
 
 **Body**
 ```json
@@ -700,7 +706,7 @@ Same shape and lifetimes as `POST /auth/login`; `lastLoginAt` is updated.
 ---
 
 ### `GET /auth/me`
-**Requires auth, but not a verified email** (`@AllowUnverified()`), so the frontend can ask an unverified user's state. Send `Authorization: Bearer <accessToken>`.
+**Requires auth, but not a verified email** (`@AllowUnverified()`), so the frontend can ask an unverified user's state. Rate limited: 20/min per IP. Send `Authorization: Bearer <accessToken>`.
 
 **Success — `200 OK`**
 ```json
@@ -712,6 +718,7 @@ If `emailVerified` is `false`, send the user to the code screen.
 | Status | Cause |
 |---|---|
 | `401` | Missing, malformed, or expired access token; or the token was issued before the user's most recent password reset, password change or `logout-all` (rejected even if not yet expired) |
+| `429` | Rate limit exceeded (20/min per IP) |
 
 ---
 

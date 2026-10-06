@@ -17,8 +17,9 @@ export const EMAIL_VERIFICATION_MAX_ATTEMPTS = 5;
 export const OAUTH_STATE_COOKIE = 'google-oauth-state';
 export const OAUTH_STATE_COOKIE_MAX_AGE_MS = 5 * 60 * 1000;
 
-export const LOGIN_THROTTLE = { default: { ttl: 60_000, limit: 5 } };
+export const LOGIN_THROTTLE = { default: { ttl: 60_000, limit: 10 } };
 export const SIGNUP_THROTTLE = { default: { ttl: 60 * 60 * 1000, limit: 10 } };
+export const AUTH_DEFAULT_THROTTLE = { default: { ttl: 60_000, limit: 20 } };
 export const FORGOT_PASSWORD_THROTTLE = {
   default: { ttl: 900_000, limit: 3 },
 };

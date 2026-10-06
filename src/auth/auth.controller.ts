@@ -35,6 +35,7 @@ import {
   RESEND_VERIFICATION_THROTTLE,
   VERIFY_EMAIL_THROTTLE,
   CHANGE_PASSWORD_THROTTLE,
+  AUTH_DEFAULT_THROTTLE,
 } from './auth.constants';
 import { ChangePasswordDto } from './dto/change-password.dto';
 
@@ -60,6 +61,7 @@ export class AuthController {
     return this.authService.login(dto);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Public()
   @Post('logout')
@@ -67,6 +69,7 @@ export class AuthController {
     return this.authService.logout(dto);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Post('logout-all')
   logoutAll(@Req() req: Request) {
@@ -74,6 +77,7 @@ export class AuthController {
     return this.authService.logoutAll(id);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('refresh')
@@ -89,6 +93,7 @@ export class AuthController {
     return this.authService.forgotPassword(dto);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @Public()
   @Post('reset-password')
@@ -104,6 +109,7 @@ export class AuthController {
     return this.authService.changePassword(id, dto);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @Public()
   @Post('oauth/exchange')
@@ -111,11 +117,13 @@ export class AuthController {
     return this.authService.exchangeOAuthLoginToken(dto);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @Public()
   @UseGuards(GoogleAuthGuard)
   @Get('google')
   googleAuth() {}
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @Public()
   @UseGuards(GoogleAuthGuard)
   @UseFilters(OAuthCallbackExceptionFilter)
@@ -145,6 +153,7 @@ export class AuthController {
     return this.emailVerificationService.resend(id);
   }
 
+  @Throttle(AUTH_DEFAULT_THROTTLE)
   @AllowUnverified()
   @Get('me')
   me(@Req() req: Request) {
