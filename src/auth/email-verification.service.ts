@@ -11,7 +11,7 @@ import { UsersService } from '../users/users.service';
 import { MailService } from '../mail/mail.service';
 import { VerificationCode } from './entities/email-verification-code.entity';
 import { User } from '../users/entities/user.entity';
-import { DataSource, Repository, IsNull, LessThan } from 'typeorm';
+import { DataSource, Repository, IsNull, LessThan, MoreThan } from 'typeorm';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomInt, createHash, randomUUID, timingSafeEqual } from 'crypto';
 import ms from 'ms';
@@ -20,6 +20,8 @@ import {
   EMAIL_VERIFICATION_CODE_LENGTH,
   EMAIL_VERIFICATION_MAX_ATTEMPTS,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
+  EMAIL_VERIFICATION_DAILY_CODE_LIMIT,
+  EMAIL_VERIFICATION_DAILY_LIMIT_MS,
 } from './auth.constants';
 
 @Injectable()
@@ -75,6 +77,20 @@ export class EmailVerificationService {
       return;
     }
 
+    const recentCodesCount = await this.verificationCodeRepository.count({
+      where: {
+        userId: user.id,
+        createdAt: MoreThan(
+          new Date(Date.now() - EMAIL_VERIFICATION_DAILY_LIMIT_MS),
+        ),
+      },
+    });
+    if (recentCodesCount >= EMAIL_VERIFICATION_DAILY_CODE_LIMIT) {
+      throw new HttpException(
+        'Too many verification codes requested, try again later',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const latest = await this.verificationCodeRepository.findOne({
       where: { userId },
       order: { createdAt: 'DESC' },

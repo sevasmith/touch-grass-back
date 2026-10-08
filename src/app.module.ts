@@ -14,7 +14,7 @@ import { typeOrmConfig } from './database/typeorm.config';
       isGlobal: true,
       validationSchema: envValidationSchema,
     }),
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 20 }]),
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 300 }]),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

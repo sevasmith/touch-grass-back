@@ -29,6 +29,7 @@ async function bootstrap() {
     origin: corsOrigins,
   });
 
+  app.enableShutdownHooks();
   await app.listen(process.env.PORT ?? 6767);
 }
 void bootstrap();
