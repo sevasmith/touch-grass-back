@@ -31,6 +31,9 @@ export class RefreshToken {
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
 
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  sessionStartedAt: Date;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

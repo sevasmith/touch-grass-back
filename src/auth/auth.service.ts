@@ -44,8 +44,11 @@ import {
   PASSWORD_RESET_COOLDOWN_MS,
   FORGOT_PASSWORD_DAILY_LIMIT_MS,
   FORGOT_PASSWORD_DAILY_TOKENS_LIMIT,
+  SESSION_MAX_AGE_MS,
 } from './auth.constants';
 import { ChangePasswordDto } from './dto/change-password.dto';
+
+class ResetTokenNotClaimed extends Error {}
 
 @Injectable()
 export class AuthService {
@@ -73,6 +76,7 @@ export class AuthService {
   private async issueTokens(
     user: User,
     manager?: EntityManager,
+    sessionStartedAt?: Date,
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const accessToken = await this.jwtService.signAsync({
       sub: user.id,
@@ -83,11 +87,17 @@ export class AuthService {
     const secret = randomBytes(32).toString('base64url');
     const refreshToken = `${id}.${secret}`;
     const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
+    const startedAt = sessionStartedAt ?? new Date();
 
     const refreshTtl = this.configService.get<string>(
       'JWT_REFRESH_TTL',
     ) as StringValue;
-    const expiresAt = new Date(Date.now() + ms(refreshTtl));
+    const expiresAt = new Date(
+      Math.min(
+        Date.now() + ms(refreshTtl),
+        startedAt.getTime() + SESSION_MAX_AGE_MS,
+      ),
+    );
 
     const repository = manager
       ? manager.withRepository(this.refreshTokenRepository)
@@ -98,6 +108,7 @@ export class AuthService {
       userId: user.id,
       tokenHash,
       expiresAt,
+      sessionStartedAt: startedAt,
     });
 
     return { accessToken, refreshToken };
@@ -189,6 +200,13 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token expired');
     }
 
+    if (
+      Date.now() - refreshTokenRecord.sessionStartedAt.getTime() >
+      SESSION_MAX_AGE_MS
+    ) {
+      throw new UnauthorizedException('Session expired');
+    }
+
     return this.dataSource.transaction(async (manager) => {
       const user = await manager.getRepository(User).findOne({
         where: { id: refreshTokenRecord.userId },
@@ -208,7 +226,11 @@ export class AuthService {
         throw new UnauthorizedException('Refresh token already used');
       }
 
-      return this.issueTokens(user, manager);
+      return this.issueTokens(
+        user,
+        manager,
+        refreshTokenRecord.sessionStartedAt,
+      );
     });
   }
 
@@ -308,12 +330,34 @@ export class AuthService {
       throw new UnauthorizedException('Reset token expired');
     }
 
-    const { affected } = await this.resetTokenRepository.update(
-      { id: tokenRecord.id, usedAt: IsNull(), invalidatedAt: IsNull() },
-      { usedAt: new Date() },
-    );
+    const newPasswordHash = await hash(dto.password);
 
-    if (!affected) {
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        await this.usersService.resetPassword(
+          tokenRecord.userId,
+          newPasswordHash,
+          manager,
+        );
+
+        const { affected } = await manager
+          .withRepository(this.resetTokenRepository)
+          .update(
+            { id: tokenRecord.id, usedAt: IsNull(), invalidatedAt: IsNull() },
+            { usedAt: new Date() },
+          );
+
+        if (!affected) throw new ResetTokenNotClaimed();
+
+        await manager
+          .withRepository(this.refreshTokenRepository)
+          .update(
+            { userId: tokenRecord.userId, revokedAt: IsNull() },
+            { revokedAt: new Date() },
+          );
+      });
+    } catch (err) {
+      if (!(err instanceof ResetTokenNotClaimed)) throw err;
       const current = await this.resetTokenRepository.findOne({
         where: { id: tokenRecord.id },
       });
@@ -325,22 +369,6 @@ export class AuthService {
         'This reset link has been replaced by a newer request',
       );
     }
-
-    const newPasswordHash = await hash(dto.password);
-
-    await this.dataSource.transaction(async (manager) => {
-      await this.usersService.resetPassword(
-        tokenRecord.userId,
-        newPasswordHash,
-        manager,
-      );
-      await manager
-        .withRepository(this.refreshTokenRepository)
-        .update(
-          { userId: tokenRecord.userId, revokedAt: IsNull() },
-          { revokedAt: new Date() },
-        );
-    });
   }
 
   async changePassword(
@@ -371,7 +399,7 @@ export class AuthService {
 
     const newPasswordHash = await hash(dto.newPassword);
 
-    await this.dataSource.transaction(async (manager) => {
+    return await this.dataSource.transaction(async (manager) => {
       await this.usersService.resetPassword(userId, newPasswordHash, manager);
       await manager
         .withRepository(this.refreshTokenRepository)
@@ -382,9 +410,8 @@ export class AuthService {
           { userId, usedAt: IsNull(), invalidatedAt: IsNull() },
           { invalidatedAt: new Date() },
         );
+      return this.issueTokens(user, manager);
     });
-
-    return this.issueTokens(user);
   }
 
   async findOrCreateOAuthUser(dto: OAuthAccountDto): Promise<User> {
