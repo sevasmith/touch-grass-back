@@ -2,6 +2,18 @@
 
 NestJS backend for touch-grass.
 
+## Who consumes this API
+
+The only frontend is a **Next.js app that renders on the server by default**. That shapes how this API is used, and several sections below are written with it in mind:
+
+- **Tokens live in secure cookies set by the Next.js Node server**, not in browser-readable storage. The server receives `{ accessToken, refreshToken }` from this API, stores them in cookies, and reads them back on later requests. How the cookies are set is the frontend's concern and isn't covered here. Browser JavaScript never sees either token.
+- **The API contract doesn't change for this.** It still returns tokens in the JSON body and still authenticates with `Authorization: Bearer <accessToken>`. This API never sets an auth cookie of its own (the only cookie it sets is the short-lived Google `state` cookie, see [Sign in with Google](#sign-in-with-google-oauth)). The Next.js server is the one that turns "cookie" into "Bearer header" on every call it makes here.
+- **Most calls come from the Next.js server, not from the user's browser.** That has two consequences: browser CORS rules don't apply to those calls (see `CORS_ORIGINS` below), and the IP address this API sees is the Next.js server's unless the real client IP is forwarded (see "Rate limiting" under [Authentication model](#authentication-model) and `docs/known-gaps.md`).
+- **The one exception is the Google login.** The *browser* itself must navigate to `GET {API}/auth/google`, because the `state` cookie has to be stored by the browser and Google redirects the browser back to this API. After that the Next.js server takes over again, see [Sign in with Google](#sign-in-with-google-oauth).
+- **Token refresh happens on the server too**, which changes how the "one refresh at a time" rule has to be honoured, see [`POST /auth/refresh`](#post-authrefresh).
+
+Wherever this document says "the frontend stores the tokens", read it as "the Next.js server writes them into its cookies".
+
 ## Project setup
 
 ```bash
@@ -46,7 +58,7 @@ The five `*_TTL` variables are durations in [`ms`](https://github.com/vercel/ms)
 | `OAUTH_LOGIN_TOKEN_TTL` | How long the short-lived, single-use OAuth login handoff token stays valid (e.g. `60s`). Allowed range: `10s`–`5m`. See [Sign in with Google](#sign-in-with-google-oauth). |
 | `EMAIL_VERIFICATION_TTL` | How long an emailed verification code stays valid (e.g. `10m`). Allowed range: `1m`–`1h`. See [Email verification](#email-verification-otp). |
 | `FRONTEND_URL` | Base URL of the frontend. Used to build the password-reset link (`${FRONTEND_URL}/reset-password?token=...`) **and** where the Google login redirects the browser afterwards (`${FRONTEND_URL}/oauth/complete?token=...` or `?error=...`). The scheme must match how the frontend is really served — `http://localhost:3000` locally, not `https://`, unless you run local HTTPS. |
-| `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. |
+| `CORS_ORIGINS` | **Comma-separated** list of allowed origins, e.g. `http://localhost:3000,https://app.touchgrass.com`. Not a JSON array — plain comma-separated string. Only browsers enforce CORS, so requests made by the Next.js server aren't affected by it; keep it set to the frontend origin(s) anyway for any call that does go straight from a browser. |
 | `BREVO_API_KEY` | API key for Brevo (transactional email provider), used to send password-reset and email-verification emails |
 | `MAIL_FROM_EMAIL`, `MAIL_FROM_NAME` | Sender identity for outgoing emails |
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth 2.0 client credentials, from Google Cloud Console → APIs & Services → Credentials. The secret is the only real secret of the two — keep it out of git. |
@@ -58,11 +70,12 @@ The five `*_TTL` variables are durations in [`ms`](https://github.com/vercel/ms)
 
 There are two ways to sign in — email + password, and Google — and **both end the same way**: the frontend holds an `{ accessToken, refreshToken }` pair and everything below applies identically to it.
 
-- **Access tokens** are short-lived JWTs. Send them as `Authorization: Bearer <accessToken>` on any endpoint that requires auth. Don't try to decode/inspect them beyond that — treat as opaque from the frontend's perspective.
-- **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one stops working immediately after use.
+- **Access tokens** are short-lived JWTs. Send them as `Authorization: Bearer <accessToken>` on any endpoint that requires auth (the Next.js server adds the header from its cookie). Don't try to decode/inspect them beyond that — treat as opaque from the frontend's perspective.
+- **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store in its cookie and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one stops working immediately after use.
+- **Sessions have an absolute lifetime of 90 days** (`SESSION_MAX_AGE_MS` in `src/auth/auth.constants.ts`), counted from the login that started them. `JWT_REFRESH_TTL` is a sliding window: every refresh gives the new token a fresh `JWT_REFRESH_TTL`, so an active user doesn't hit it. The 90 days is a hard cap on top of that. Rotating a refresh token carries the original session start (`refresh_tokens.sessionStartedAt`) forward, and only a new login (password, Google, signup, or the fresh pair issued by `change-password`) starts a new session. Once the cap is reached, `/auth/refresh` answers `401 Session expired` however recently the token was used, and the user has to log in again. This doesn't revoke the user's other sessions. An access token already issued can outlive the cap by up to `JWT_ACCESS_TTL`. Sessions that were already open when this was introduced count from the day the column was added.
 - If a refresh token is reused after being invalidated (revoked or already-rotated), the backend treats that as a possible compromise and ends **all** of that user's sessions exactly like `logout-all` does: every refresh token is revoked *and* every access token issued so far is rejected immediately (via `User.tokensValidAfter`), not only once it expires — every session gets logged out, not just the one making the suspicious request.
 - Resetting a password revokes all of the user's refresh tokens *and* invalidates any access token issued before the reset (even if that access token hasn't technically expired yet) — so a password reset is effectively an instant global logout.
-- **Changing a password** while logged in (`POST /auth/change-password`) does the same to every *other* session, but the device that made the change gets a fresh `{ accessToken, refreshToken }` pair in the response and stays logged in. The frontend must replace its stored tokens with the ones in that response. Access tokens are compared against the change at one-second granularity, so a token issued in the same second as the change is accepted.
+- **Changing a password** while logged in (`POST /auth/change-password`) does the same to every *other* session, but the device that made the change gets a fresh `{ accessToken, refreshToken }` pair in the response and stays logged in. The Next.js server must overwrite its token cookies with the ones in that response. Access tokens are compared against the change at one-second granularity, so a token issued in the same second as the change is accepted.
 - **Logging out everywhere** (`POST /auth/logout-all`) revokes all of the user's refresh tokens and invalidates every access token issued before the call, on every device including the one that made it. Access tokens are invalidated through `User.tokensValidAfter`, a timestamp the backend compares against each token's `iat` (the same way it uses `passwordChangedAt` for password changes). A token is rejected if it was issued before **either** timestamp. After `logout-all` the user simply logs in again; tokens from the new login are accepted.
 - Standard error shape for all thrown exceptions (from Nest's default exception filter):
   ```json
@@ -70,7 +83,7 @@ There are two ways to sign in — email + password, and Google — and **both en
   ```
   For validation errors (400s), `message` is an array of strings, one per failed field.
 - **Three access tiers.** Every route is one of: `@Public()` (no token needed), `@AllowUnverified()` (valid access token, but the email may still be unverified), or the default (valid access token **and** a verified email — otherwise `403 Email not verified`). See [Email verification](#email-verification-otp) for why there are three and where each route sits.
-- Rate limiting: the app-wide default is 300 requests/minute per IP, so ordinary (non-auth) routes have headroom. The auth routes set their own, much stricter limits on top of it: `signup` is capped at 10/hour, `login` at 10/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Every other auth route (`logout`, `logout-all`, `refresh`, `reset-password`, `oauth/exchange`, `me` and the two Google routes) shares a default auth limit of 20/minute (`AUTH_DEFAULT_THROTTLE`). Counters are kept per route and per IP, so each route has its own bucket. Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address. On top of them, two limits are **per account** and don't depend on the IP: at most 10 verification codes per user per 24 hours ([`resend-verification`](#6-resending-a-code)) and at most 10 password-reset emails per user per 24 hours ([`forgot-password`](#post-authforgot-password)).
+- Rate limiting: the app-wide default is 300 requests/minute per IP, so ordinary (non-auth) routes have headroom. The auth routes set their own, much stricter limits on top of it: `signup` is capped at 10/hour, `login` at 10/minute, `forgot-password` at 3/15 minutes, `verify-email` at 5/minute, `resend-verification` at 3/15 minutes and `change-password` at 5/minute. Every other auth route (`logout`, `logout-all`, `refresh`, `reset-password`, `oauth/exchange`, `me` and the two Google routes) shares a default auth limit of 20/minute (`AUTH_DEFAULT_THROTTLE`). Counters are kept per route and per IP, so each route has its own bucket. **Because the Next.js server makes most of these calls, "per IP" currently means the Next.js server's address, not the end user's**, so all users would share one set of counters until the real client IP is forwarded and trusted (see `docs/known-gaps.md`, **Must implement now**). Exceeding a limit returns `429 Too Many Requests` (except on `GET /auth/google/callback`, where it becomes a redirect — see [below](#get-authgooglecallback)). All of these limits are per IP address. On top of them, two limits are **per account** and don't depend on the IP: at most 10 verification codes per user per 24 hours ([`resend-verification`](#6-resending-a-code)) and at most 10 password-reset emails per user per 24 hours ([`forgot-password`](#post-authforgot-password)).
 - **Token ids are validated before any database lookup.** Every opaque token (`refresh`, reset, OAuth handoff) is `id.secret` where `id` is a UUID. A token whose `id` isn't a UUID is rejected as an invalid token (`401`, or `204` for `logout`) instead of reaching Postgres.
 - **Accounts can have no password.** A user created through Google has `passwordHash = NULL` until they set one via *forgot password → reset password* (there is no authenticated "set a first password" endpoint yet, see `docs/known-gaps.md`). Password login for such an account returns the same generic `401 Invalid credentials`, and `POST /auth/change-password` returns `400`, since there is no current password to check.
 
@@ -82,30 +95,13 @@ This section explains the whole cycle **and why each piece exists**, so that cha
 
 1. Send the **browser itself** to `GET {API}/auth/google` — `window.location.href = ...` or a plain `<a href>`. **Not `fetch`/`axios`** (see [why](#2-the-state-cookie--protection-against-login-csrf)).
 2. The user signs in at Google. Afterwards the browser lands on **`{FRONTEND_URL}/oauth/complete`** with either `?token=...` (success) or `?error=...` (failure).
-3. On success, immediately `POST {API}/auth/oauth/exchange` with `{ "token": "..." }`. You get back the same `{ accessToken, refreshToken }` as `POST /auth/login`. From here on it's the normal session lifecycle.
+3. On success, **the Next.js server** (not client-side code) immediately `POST`s `{API}/auth/oauth/exchange` with `{ "token": "..." }`. It gets back the same `{ accessToken, refreshToken }` as `POST /auth/login` and stores them like any other login. From here on it's the normal session lifecycle, and the browser never handles either token.
 
-A minimal `/oauth/complete` page:
+Doing the exchange on the server means the handoff token is used once, server to server, and doesn't have to stay in the browser's address bar. Only step 1 has to be a browser navigation straight to the API's own origin; don't send it through a Next.js rewrite or proxy, and don't call `/auth/google` from the Next.js server (see [why](#2-the-state-cookie--protection-against-login-csrf)).
 
-```ts
-const params = new URLSearchParams(window.location.search);
-const error = params.get('error');   // access_denied | email_already_in_use | too_many_requests | oauth_failed
-const token = params.get('token');
+On failure the redirect carries `?error=` with one of `access_denied`, `email_already_in_use`, `too_many_requests` or `oauth_failed` (see [Errors](#6-errors--why-they-are-redirects-not-json)).
 
-window.history.replaceState(null, '', window.location.pathname); // remove the token from the URL/history right away
-
-if (error || !token) {
-  // show a message for `error` and offer "try again"
-} else {
-  const res = await fetch(`${API_URL}/auth/oauth/exchange`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token }),
-  });
-  const { accessToken, refreshToken } = await res.json(); // store like a normal login
-}
-```
-
-> **React/Next.js dev gotcha:** `<StrictMode>` runs effects twice in development. The handoff token is single-use, so the second `exchange` call gets `401 OAuth login token already used`. Guard the effect with a `useRef` flag so the exchange runs once.
+> **Single-use gotcha:** the handoff token can be used only once, so a second `exchange` call gets `401 OAuth login token already used`. Make sure nothing calls `/oauth/complete` twice.
 
 ### The full cycle
 
@@ -167,7 +163,7 @@ Details worth knowing:
 - **Why a cookie and not a server-side session?** The API is stateless (`PassportModule.register({ session: false })`, Bearer tokens). A short-lived cookie keeps it that way — no session store to run or scale.
 - Cookie: `google-oauth-state`, `HttpOnly` (JavaScript can't read it), `SameSite=Lax`, 5-minute lifetime, `Secure` when `NODE_ENV=production`, and it is **deleted on every callback** (single use).
 - **Why `SameSite=Lax` and not `Strict`?** The callback is a *cross-site top-level navigation* coming from `accounts.google.com`. `Strict` would drop the cookie on exactly that request; `Lax` sends it.
-- **Why the frontend must navigate instead of `fetch`ing `/auth/google`:** the cookie has to be stored by the browser as part of a real navigation, and a cross-origin `fetch` can't follow a redirect to Google anyway.
+- **Why the frontend must navigate instead of `fetch`ing `/auth/google`:** the cookie has to be stored by the browser as part of a real navigation, and a cross-origin `fetch` can't follow a redirect to Google anyway. With a Next.js frontend this also rules out calling the route from the Next.js server (the cookie would never reach the user's browser) and rewriting it through the frontend's own origin (the cookie would be stored for the wrong host, and the callback would not see it).
 - **Why `cookie-parser`:** the guard reads `req.cookies`, which Express only fills when `cookieParser()` is installed (in `main.ts`). Without it every callback would be rejected.
 - The start and the callback must happen on the **same hostname** (`localhost` vs `127.0.0.1` are different cookie jars). `GOOGLE_CALLBACK_URL` decides the callback host, so start the flow on that host too.
 
@@ -209,9 +205,9 @@ The callback request is made by the **browser navigating**, not by frontend code
 | Return `{ accessToken, refreshToken }` as JSON from the callback | The user just sees raw JSON in the tab. |
 | Redirect with the real tokens in the URL | Tokens end up in browser history, server/proxy logs and `Referer` headers; the refresh token is long-lived. |
 | Set cookies | The API authenticates with `Authorization: Bearer`, not cookies, and a cross-site cookie setup would need its own CSRF story. |
-| **Redirect with a throwaway handoff token, then exchange it with a normal `fetch`** ✅ | The URL only ever contains something that is worthless after one use. |
+| **Redirect with a throwaway handoff token, then exchange it with a normal server-to-server request from the Next.js server** ✅ | The URL only ever contains something that is worthless after one use. |
 
-The handoff token has the same shape and treatment as the refresh/reset tokens: opaque `id.secret`, only its **SHA-256 hash** is stored (`oauth_login_tokens`), constant-time comparison, short lifetime (`OAUTH_LOGIN_TOKEN_TTL`), and **single use** via the claim-then-act pattern — an atomic `UPDATE … WHERE usedAt IS NULL` checked through `affected` *before* anything else happens, so two concurrent exchanges can't both win. (Unlike a replayed refresh token, a replayed handoff token just returns `401`; it does not log the user out everywhere.) The frontend should strip it from the URL immediately (see the snippet above).
+The handoff token has the same shape and treatment as the refresh/reset tokens: opaque `id.secret`, only its **SHA-256 hash** is stored (`oauth_login_tokens`), constant-time comparison, short lifetime (`OAUTH_LOGIN_TOKEN_TTL`), and **single use** via the claim-then-act pattern — an atomic `UPDATE … WHERE usedAt IS NULL` checked through `affected` *before* anything else happens, so two concurrent exchanges can't both win. (Unlike a replayed refresh token, a replayed handoff token just returns `401`; it does not log the user out everywhere.) The Next.js server exchanges it right away and redirects the browser on, so it doesn't linger in the address bar (see the snippet above).
 
 `POST /auth/oauth/exchange` then updates `lastLoginAt` and issues tokens exactly like `login`.
 
@@ -238,7 +234,7 @@ Only the **callback** has this filter. `GET /auth/google` (the start) returns a 
 
 In CI/deploy, `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_CALLBACK_URL` are GitHub Actions **variables** and `GOOGLE_OAUTH_CLIENT_SECRET` is a **secret**; `OAUTH_LOGIN_TOKEN_TTL` is a variable.
 
-**Trying it locally:** start the backend and open `http://localhost:6767/auth/google` in a browser (curl can't drive Google's consent screen). Your frontend origin must be in `CORS_ORIGINS`, since it calls `/auth/oauth/exchange` with `fetch`.
+**Trying it locally:** start the backend and open `http://localhost:6767/auth/google` in a browser (curl can't drive Google's consent screen). The exchange is made by the Next.js server, so it isn't subject to CORS and `CORS_ORIGINS` doesn't matter for it.
 
 ### 8. Troubleshooting
 
@@ -246,7 +242,7 @@ You land on `?error=access_denied` — look at the backend log line just before 
 
 | Log line | Cause |
 |---|---|
-| `State check failed (no state cookie)` | The state cookie didn't come back. Usual causes: the flow was started with `fetch`/a proxy instead of a browser navigation; started on a different hostname than `GOOGLE_CALLBACK_URL` (`127.0.0.1` vs `localhost`); more than 5 minutes passed; the server wasn't restarted after `cookieParser` was added. The line shows the `host` and the cookie names that *did* arrive. |
+| `State check failed (no state cookie)` | The state cookie didn't come back. Usual causes: the flow was started with `fetch`, from the Next.js server, or through a Next.js rewrite/proxy instead of a browser navigation straight to the API; started on a different hostname than `GOOGLE_CALLBACK_URL` (`127.0.0.1` vs `localhost`); more than 5 minutes passed; the server wasn't restarted after `cookieParser` was added. The line shows the `host` and the cookie names that *did* arrive. |
 | `State check failed (state mismatch)` | Cookie present but different from the returned `state` — usually two logins started in two tabs; try again. |
 | `Passport rejected the callback … info=[…]` | Google itself reported an error, e.g. the user cancelled (`info` carries Google's `error_description` when it sent one). |
 | `Passport rejected the callback … google said: {…}` | The `code` exchange failed (wrong client secret, `redirect_uri` mismatch, reused `code`). Google's message is in the line. |
@@ -268,7 +264,9 @@ Password sign-up proves nothing about the email address: anyone can register `so
 
 ### For frontend developers (the short version)
 
-1. `POST /auth/signup` as before. You get `{ accessToken, refreshToken }` **and** the backend emails a 6-digit code. Treat the new user as **unverified**.
+Every call below is made by the **Next.js server**, which reads the access token from its cookie and adds the `Authorization` header. Browser code never holds the token.
+
+1. `POST /auth/signup` as before. You get `{ accessToken, refreshToken }` (which the Next.js server stores in its cookies) **and** the backend emails a 6-digit code. Treat the new user as **unverified**.
 2. Show a "enter the code we emailed you" screen. Submit it with `POST /auth/verify-email` `{ "code": "123456" }` and the normal `Authorization: Bearer` header. `204` means the email is now verified.
 3. Offer a "resend code" button → `POST /auth/resend-verification` (no body). It is limited to one per minute.
 4. **No re-login or token refresh is needed after verifying** — the access token you already hold starts working on every route immediately.
@@ -276,7 +274,8 @@ Password sign-up proves nothing about the email address: anyone can register `so
 6. Any other protected route called by an unverified user answers `403` with `message: "Email not verified"`. Handle that globally by routing to the code screen too.
 
 ```ts
-// after signup, or when /auth/me says emailVerified === false
+// made by the Next.js server, after signup or when /auth/me says emailVerified === false
+// (accessToken comes from the access-token cookie)
 const res = await fetch(`${API_URL}/auth/verify-email`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
@@ -492,7 +491,7 @@ Note: this always returns `204` regardless of whether the refresh token actually
 - every refresh token of the user is revoked, so no device can get a new pair;
 - every access token issued before this call stops working immediately (not only when it would have expired), via `User.tokensValidAfter`.
 
-The frontend should clear its stored tokens and send the user to the login screen. Logging in again works normally. Calling it twice is harmless.
+The Next.js server should delete its token cookies and send the user to the login screen. Logging in again works normally. Calling it twice is harmless.
 
 **Errors**
 | Status | Cause |
@@ -525,10 +524,19 @@ Public. Rate limited: 20/min per IP. Rotates the refresh token — the one you s
 | `401` | `Invalid refresh token` — malformed (including an `id` that isn't a UUID), unrecognized, or doesn't match the stored hash |
 | `401` | `Refresh token revoked` — reuse of an already-revoked token (this also ends every session as `logout-all` does: all refresh tokens are revoked and all earlier access tokens stop working) |
 | `401` | `Refresh token expired` |
+| `401` | `Session expired` — the session reached its absolute lifetime (90 days from the login that started it), however recently it was refreshed. The user has to log in again; clear the stored tokens. This does **not** revoke the user's other sessions. |
 | `401` | `Refresh token already used` — the same token was raced/replayed |
 | `429` | Rate limit exceeded (20/min per IP) |
 
-**Frontend requirement: never have two refreshes in flight.** The backend has no grace window. A second request that presents a refresh token that was just rotated is treated as a replay, and that revokes **all** of the user's sessions. Keep one refresh promise per client, make every caller that needs a new access token wait on it, share it across tabs with a lock (Web Locks API or `BroadcastChannel`), and always store the new refresh token before releasing it. See `docs/known-gaps.md` for the reasoning.
+**Frontend requirement: never have two refreshes in flight.** The backend has no grace window. A second request that presents a refresh token that was just rotated is treated as a replay, and that revokes **all** of the user's sessions.
+
+The refresh is done by the Next.js server, and several requests can reach it at once carrying the *same* refresh token (parallel requests, several tabs, retries). If each of them sees an expired access token and calls `/auth/refresh`, the second call replays a rotated token and logs the user out everywhere. So:
+- Only one `/auth/refresh` call may be made per refresh token; concurrent requests must wait for its result instead of calling it themselves.
+- Always store the new refresh token before anything else can use it, and never retry `/auth/refresh` with the old token after a failure without first checking whether it was already replaced.
+
+The API shuts down gracefully on SIGTERM (a deploy lets in-flight requests, including a refresh, finish before the process exits), so a deploy no longer loses a response on its own. A crash or a dropped connection still can, which is why the rules above stay.
+
+See `docs/known-gaps.md` for the reasoning.
 
 ---
 
@@ -567,7 +575,7 @@ Public. Rate limited: 20/min per IP. Uses the token from the link sent by `forgo
 { "token": "...", "password": "at least 8 chars, max 72" }
 ```
 
-**Success — `204 No Content`** — the password is changed and every active session (refresh token) for that user is revoked.
+**Success — `204 No Content`** — the password is changed and every active session (refresh token) for that user is revoked. The link is only consumed together with the password change: if the request fails with a server error (`5xx`), nothing was changed and the same link can be tried again.
 
 **Errors**
 | Status | Cause |
@@ -681,7 +689,7 @@ Public. Rate limited: 20/min per IP. **Called by Google's redirect, never by you
 ---
 
 ### `POST /auth/oauth/exchange`
-Public. Rate limited: 20/min per IP. Swaps the single-use handoff token from the callback redirect for real tokens. Call it with `fetch` from the `/oauth/complete` page.
+Public. Rate limited: 20/min per IP. Swaps the single-use handoff token from the callback redirect for real tokens. Call it from the Next.js server, not from browser code.
 
 **Body**
 ```json
