@@ -45,10 +45,13 @@ import {
   FORGOT_PASSWORD_DAILY_LIMIT_MS,
   FORGOT_PASSWORD_DAILY_TOKENS_LIMIT,
   SESSION_MAX_AGE_MS,
+  REFRESH_TOKEN_REPLAY_WINDOW_TTL,
 } from './auth.constants';
+import { sealRefreshToken, openRefreshToken } from './refresh-replay.crypto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 
 class ResetTokenNotClaimed extends Error {}
+class RefreshTokenNotClaimed extends Error {}
 
 @Injectable()
 export class AuthService {
@@ -73,15 +76,73 @@ export class AuthService {
     private readonly oAuthLoginTokenRepository: Repository<OAuthLoginToken>,
   ) {}
 
+  private async tryReplay(
+    oldTokenRecord: RefreshToken,
+    submittedId: string,
+    submittedSecret: string,
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+  } | null> {
+    if (
+      !oldTokenRecord.replacedAt ||
+      oldTokenRecord.replacedAt <
+        new Date(Date.now() - REFRESH_TOKEN_REPLAY_WINDOW_TTL) ||
+      !oldTokenRecord.replacementCipher ||
+      !oldTokenRecord.replacementId
+    ) {
+      return null;
+    }
+
+    const newRefreshToken = openRefreshToken(
+      submittedId,
+      submittedSecret,
+      oldTokenRecord.replacementCipher,
+    );
+
+    if (!newRefreshToken) return null;
+
+    const replacementTokenRecord = await this.refreshTokenRepository.findOne({
+      where: { id: oldTokenRecord.replacementId },
+    });
+
+    if (!replacementTokenRecord) return null;
+    if (
+      replacementTokenRecord.revokedAt ||
+      replacementTokenRecord.expiresAt < new Date()
+    )
+      return null;
+
+    const decryptedHash = createHash('sha256').update(newRefreshToken).digest();
+    const replacementSavedHash = Buffer.from(
+      replacementTokenRecord.tokenHash,
+      'hex',
+    );
+    if (!timingSafeEqual(decryptedHash, replacementSavedHash)) return null;
+
+    const user = await this.usersService.findById(oldTokenRecord.userId);
+
+    if (!user) return null;
+
+    return {
+      accessToken: await this.issueAccessToken(user),
+      refreshToken: newRefreshToken,
+    };
+  }
+
+  private async issueAccessToken(user: User) {
+    return await this.jwtService.signAsync({
+      sub: user.id,
+      email: user.email,
+    });
+  }
+
   private async issueTokens(
     user: User,
     manager?: EntityManager,
     sessionStartedAt?: Date,
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    const accessToken = await this.jwtService.signAsync({
-      sub: user.id,
-      email: user.email,
-    });
+    const accessToken = await this.issueAccessToken(user);
 
     const id = randomUUID();
     const secret = randomBytes(32).toString('base64url');
@@ -172,12 +233,12 @@ export class AuthService {
   async refresh(
     dto: RefreshDto,
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    const [id, secret] = dto.refreshToken.split('.');
-    if (!id || !secret || !isUUID(id)) {
+    const [dtoTokenId, dtoTokenSecret] = dto.refreshToken.split('.');
+    if (!dtoTokenId || !dtoTokenSecret || !isUUID(dtoTokenId)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
     const refreshTokenRecord = await this.refreshTokenRepository.findOne({
-      where: { id },
+      where: { id: dtoTokenId },
     });
 
     if (!refreshTokenRecord) {
@@ -192,6 +253,13 @@ export class AuthService {
     }
 
     if (refreshTokenRecord.revokedAt) {
+      const replay = await this.tryReplay(
+        refreshTokenRecord,
+        dtoTokenId,
+        dtoTokenSecret,
+      );
+      if (replay) return replay;
+
       await this.logoutAll(refreshTokenRecord.userId);
       throw new UnauthorizedException('Refresh token revoked');
     }
@@ -207,31 +275,61 @@ export class AuthService {
       throw new UnauthorizedException('Session expired');
     }
 
-    return this.dataSource.transaction(async (manager) => {
-      const user = await manager.getRepository(User).findOne({
-        where: { id: refreshTokenRecord.userId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!user) {
-        throw new UnauthorizedException('Invalid refresh token');
-      }
+    return this.dataSource
+      .transaction(async (manager) => {
+        const user = await manager.getRepository(User).findOne({
+          where: { id: refreshTokenRecord.userId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!user) {
+          throw new UnauthorizedException('Invalid refresh token');
+        }
 
-      const { affected } = await manager
-        .withRepository(this.refreshTokenRepository)
-        .update(
-          { id: refreshTokenRecord.id, revokedAt: IsNull() },
-          { revokedAt: new Date() },
+        const newDate = new Date();
+
+        const { affected } = await manager
+          .withRepository(this.refreshTokenRepository)
+          .update(
+            { id: refreshTokenRecord.id, revokedAt: IsNull() },
+            { revokedAt: newDate, replacedAt: newDate },
+          );
+        if (!affected) {
+          throw new RefreshTokenNotClaimed();
+        }
+
+        const { accessToken, refreshToken } = await this.issueTokens(
+          user,
+          manager,
+          refreshTokenRecord.sessionStartedAt,
         );
-      if (!affected) {
-        throw new UnauthorizedException('Refresh token already used');
-      }
 
-      return this.issueTokens(
-        user,
-        manager,
-        refreshTokenRecord.sessionStartedAt,
-      );
-    });
+        const [replacementId] = refreshToken.split('.');
+        const replacementCipher = sealRefreshToken(
+          dtoTokenId,
+          dtoTokenSecret,
+          refreshToken,
+        );
+
+        await manager
+          .withRepository(this.refreshTokenRepository)
+          .update(
+            { id: refreshTokenRecord.id },
+            { replacementId, replacementCipher },
+          );
+        return { accessToken, refreshToken };
+      })
+      .catch(async (err: unknown) => {
+        if (!(err instanceof RefreshTokenNotClaimed)) throw err;
+        const latestRecord = await this.refreshTokenRepository.findOne({
+          where: { id: dtoTokenId },
+        });
+        const replay = latestRecord
+          ? await this.tryReplay(latestRecord, dtoTokenId, dtoTokenSecret)
+          : null;
+        if (replay) return replay;
+
+        throw new UnauthorizedException('Refresh token already used');
+      });
   }
 
   async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {

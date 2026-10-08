@@ -113,6 +113,8 @@ They are `Joi.string()`. A typo like `15mins` passes boot, then `ms()` returns `
 
 - **Graceful shutdown was missing** (`src/main.ts`). **(FIXED: `app.enableShutdownHooks()`; not yet verified against the real ECS stop timeout, see `known-gaps.md`)** A deploy could kill a committed `/auth/refresh` before its response was sent, and the Next.js retry then looked like a replay and revoked every session.
 
+- **Refresh was not idempotent** (`AuthService.refresh`). **(FIXED: a 20-second replay window returns the same new refresh token, stored encrypted under a key derived from the old token's secret; the loser of a concurrent claim is served the winner's result; only rotation sets `replacedAt`, so logout, `logout-all`, reset and `change-password` still count as reuse; only the crypto helper has automated tests, `refresh()` itself has none yet)** A response lost in flight, or two parallel requests from the Next.js server, used to revoke every session of the user. The cost, accepted on purpose, is that a thief replaying the old token inside the window gets a working copy of the new pair instead of a rejection (see `known-gaps.md`, **Frontend dependencies**).
+
 ### Already in `known-gaps.md` (scored, not repeated)
 
 - Throttling is in-memory and breaks behind a proxy or with more than one task (`trust proxy`, Redis).
@@ -120,7 +122,7 @@ They are `Joi.string()`. A typo like `15mins` passes boot, then `ms()` returns `
 - A completed password reset doesn't mark the email verified.
 - Unverified accounts squat their email forever.
 - `signup` and OAuth still reveal whether an email exists.
-- No refresh grace window; clients must serialize refreshes.
+- ~~No refresh grace window; clients must serialize refreshes.~~ Done: a 20-second idempotent replay window (see "Found after the review"); clients should still de-duplicate, but a mistake is no longer fatal.
 - The `forgot-password` and `resend` cooldowns have small races.
 - No authenticated "set first password" for Google-only users.
 

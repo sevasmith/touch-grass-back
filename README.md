@@ -10,7 +10,7 @@ The only frontend is a **Next.js app that renders on the server by default**. Th
 - **The API contract doesn't change for this.** It still returns tokens in the JSON body and still authenticates with `Authorization: Bearer <accessToken>`. This API never sets an auth cookie of its own (the only cookie it sets is the short-lived Google `state` cookie, see [Sign in with Google](#sign-in-with-google-oauth)). The Next.js server is the one that turns "cookie" into "Bearer header" on every call it makes here.
 - **Most calls come from the Next.js server, not from the user's browser.** That has two consequences: browser CORS rules don't apply to those calls (see `CORS_ORIGINS` below), and the IP address this API sees is the Next.js server's unless the real client IP is forwarded (see "Rate limiting" under [Authentication model](#authentication-model) and `docs/known-gaps.md`).
 - **The one exception is the Google login.** The *browser* itself must navigate to `GET {API}/auth/google`, because the `state` cookie has to be stored by the browser and Google redirects the browser back to this API. After that the Next.js server takes over again, see [Sign in with Google](#sign-in-with-google-oauth).
-- **Token refresh happens on the server too**, which changes how the "one refresh at a time" rule has to be honoured, see [`POST /auth/refresh`](#post-authrefresh).
+- **Token refresh happens on the server too**, which is why the API tolerates a repeated refresh for a short window, and what the Next.js server should still do about concurrent refreshes, see [`POST /auth/refresh`](#post-authrefresh).
 
 Wherever this document says "the frontend stores the tokens", read it as "the Next.js server writes them into its cookies".
 
@@ -71,9 +71,9 @@ The five `*_TTL` variables are durations in [`ms`](https://github.com/vercel/ms)
 There are two ways to sign in — email + password, and Google — and **both end the same way**: the frontend holds an `{ accessToken, refreshToken }` pair and everything below applies identically to it.
 
 - **Access tokens** are short-lived JWTs. Send them as `Authorization: Bearer <accessToken>` on any endpoint that requires auth (the Next.js server adds the header from its cookie). Don't try to decode/inspect them beyond that — treat as opaque from the frontend's perspective.
-- **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store in its cookie and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one stops working immediately after use.
+- **Refresh tokens** are opaque random strings (`id.secret` format internally, but the frontend should just treat the whole string as an opaque blob to store in its cookie and send back). They are **single-use and rotate**: every call to `/auth/refresh` invalidates the token you sent and returns a brand-new `{ accessToken, refreshToken }` pair. Always persist the newest refresh token you receive — the old one is only good for a 20-second [replay window](#post-authrefresh) after use (a repeated call returns the same new token), and after that it is dead.
 - **Sessions have an absolute lifetime of 90 days** (`SESSION_MAX_AGE_MS` in `src/auth/auth.constants.ts`), counted from the login that started them. `JWT_REFRESH_TTL` is a sliding window: every refresh gives the new token a fresh `JWT_REFRESH_TTL`, so an active user doesn't hit it. The 90 days is a hard cap on top of that. Rotating a refresh token carries the original session start (`refresh_tokens.sessionStartedAt`) forward, and only a new login (password, Google, signup, or the fresh pair issued by `change-password`) starts a new session. Once the cap is reached, `/auth/refresh` answers `401 Session expired` however recently the token was used, and the user has to log in again. This doesn't revoke the user's other sessions. An access token already issued can outlive the cap by up to `JWT_ACCESS_TTL`. Sessions that were already open when this was introduced count from the day the column was added.
-- If a refresh token is reused after being invalidated (revoked or already-rotated), the backend treats that as a possible compromise and ends **all** of that user's sessions exactly like `logout-all` does: every refresh token is revoked *and* every access token issued so far is rejected immediately (via `User.tokensValidAfter`), not only once it expires — every session gets logged out, not just the one making the suspicious request.
+- If a refresh token is reused after being invalidated (revoked or already-rotated), **except** for a repeat of a just-rotated token inside the 20-second replay window (see [`POST /auth/refresh`](#post-authrefresh)), the backend treats that as a possible compromise and ends **all** of that user's sessions exactly like `logout-all` does: every refresh token is revoked *and* every access token issued so far is rejected immediately (via `User.tokensValidAfter`), not only once it expires — every session gets logged out, not just the one making the suspicious request.
 - Resetting a password revokes all of the user's refresh tokens *and* invalidates any access token issued before the reset (even if that access token hasn't technically expired yet) — so a password reset is effectively an instant global logout.
 - **Changing a password** while logged in (`POST /auth/change-password`) does the same to every *other* session, but the device that made the change gets a fresh `{ accessToken, refreshToken }` pair in the response and stays logged in. The Next.js server must overwrite its token cookies with the ones in that response. Access tokens are compared against the change at one-second granularity, so a token issued in the same second as the change is accepted.
 - **Logging out everywhere** (`POST /auth/logout-all`) revokes all of the user's refresh tokens and invalidates every access token issued before the call, on every device including the one that made it. Access tokens are invalidated through `User.tokensValidAfter`, a timestamp the backend compares against each token's `iat` (the same way it uses `passwordChangedAt` for password changes). A token is rejected if it was issued before **either** timestamp. After `logout-all` the user simply logs in again; tokens from the new login are accepted.
@@ -507,6 +507,8 @@ Note: a token issued in the same second as the call is still accepted (the compa
 ### `POST /auth/refresh`
 Public. Rate limited: 20/min per IP. Rotates the refresh token — the one you send is invalidated, a new pair is issued.
 
+**Idempotent for 20 seconds.** If the same refresh token is sent again within 20 seconds of being rotated (`REFRESH_TOKEN_REPLAY_WINDOW_TTL`), the API doesn't treat it as a replay. It answers `200` with **the same `refreshToken` as the first call** and a freshly signed `accessToken` (the access token differs, the refresh token is identical). So two parallel requests, or a retry after a lost response, both end up with the same valid pair and can both write it to the cookie. The window only applies to a token that was *rotated by this endpoint*, and only while the new token is still alive: if the new token was already used, or the user did `logout`, `logout-all`, a password reset or a password change in the meantime, the repeat is a reuse. After the 20 seconds the old token is dead for good.
+
 **Body**
 ```json
 { "refreshToken": "..." }
@@ -522,21 +524,21 @@ Public. Rate limited: 20/min per IP. Rotates the refresh token — the one you s
 |---|---|
 | `400` | Validation failed |
 | `401` | `Invalid refresh token` — malformed (including an `id` that isn't a UUID), unrecognized, or doesn't match the stored hash |
-| `401` | `Refresh token revoked` — reuse of an already-revoked token (this also ends every session as `logout-all` does: all refresh tokens are revoked and all earlier access tokens stop working) |
+| `401` | `Refresh token revoked` — reuse of an already-revoked token that is **not** a valid replay (a rotated token sent again after the 20-second window, a token revoked by logout/`logout-all`/reset/password change, or one whose replacement was already used or revoked). This also ends every session as `logout-all` does: all refresh tokens are revoked and all earlier access tokens stop working |
 | `401` | `Refresh token expired` |
 | `401` | `Session expired` — the session reached its absolute lifetime (90 days from the login that started it), however recently it was refreshed. The user has to log in again; clear the stored tokens. This does **not** revoke the user's other sessions. |
-| `401` | `Refresh token already used` — the same token was raced/replayed |
+| `401` | `Refresh token already used` — two requests with the same token raced and the loser couldn't be served the winner's result (rare: the winner's result was already unusable). Doesn't revoke other sessions. In the normal case the loser simply gets `200` with the same pair as the winner |
 | `429` | Rate limit exceeded (20/min per IP) |
 
-**Frontend requirement: never have two refreshes in flight.** The backend has no grace window. A second request that presents a refresh token that was just rotated is treated as a replay, and that revokes **all** of the user's sessions.
+**Frontend guidance.** The refresh is done by the Next.js server, and several requests can reach it at once carrying the *same* refresh token (parallel requests, several tabs, retries). Because of the replay window these no longer log the user out, but you should still:
+- De-duplicate concurrent refreshes per refresh token where you can, so only one call reaches the API. It saves requests and rate-limit budget, and it keeps you from depending on the window.
+- Always write the `refreshToken` from the response into the cookie, whichever call it came from. Parallel calls return the same one, so writing it twice is harmless.
+- A retry with the **same old token** after a failed or lost response is safe **only within 20 seconds** of the original request. After that it is a reuse and ends every session, so don't retry a refresh later than that with a token you aren't sure is still current. If the cookie already holds a different (newer) refresh token, use that one instead.
+- Treat `401 Refresh token revoked` and `401 Session expired` as "log in again": clear the cookies.
 
-The refresh is done by the Next.js server, and several requests can reach it at once carrying the *same* refresh token (parallel requests, several tabs, retries). If each of them sees an expired access token and calls `/auth/refresh`, the second call replays a rotated token and logs the user out everywhere. So:
-- Only one `/auth/refresh` call may be made per refresh token; concurrent requests must wait for its result instead of calling it themselves.
-- Always store the new refresh token before anything else can use it, and never retry `/auth/refresh` with the old token after a failure without first checking whether it was already replaced.
+**Deploys.** The API shuts down gracefully on SIGTERM (a deploy lets in-flight requests, including a refresh, finish before the process exits), and a response lost to a crash or a dropped connection is recoverable by retrying within the replay window.
 
-The API shuts down gracefully on SIGTERM (a deploy lets in-flight requests, including a refresh, finish before the process exits), so a deploy no longer loses a response on its own. A crash or a dropped connection still can, which is why the rules above stay.
-
-See `docs/known-gaps.md` for the reasoning.
+See `docs/known-gaps.md` for the limits of this design (what the window deliberately weakens).
 
 ---
 

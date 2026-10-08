@@ -36,4 +36,13 @@ export class RefreshToken {
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  replacedAt: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  replacementId: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  replacementCipher: string | null;
 }
